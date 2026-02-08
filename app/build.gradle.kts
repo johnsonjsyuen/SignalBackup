@@ -22,6 +22,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -106,7 +107,7 @@ dependencies {
     implementation(libs.jackson.core)
 
     // DocumentFile
-    implementation("androidx.documentfile:documentfile:1.0.1")
+    implementation(libs.androidx.documentfile)
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)

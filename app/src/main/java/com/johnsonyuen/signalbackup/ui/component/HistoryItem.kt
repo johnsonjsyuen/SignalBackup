@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.johnsonyuen.signalbackup.domain.model.UploadRecord
 import com.johnsonyuen.signalbackup.domain.model.UploadResultStatus
+import com.johnsonyuen.signalbackup.util.formatFileSize
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
@@ -54,7 +55,7 @@ fun HistoryItem(record: UploadRecord, modifier: Modifier = Modifier) {
             }
 
             Column(horizontalAlignment = Alignment.End) {
-                val sizeText = formatSize(record.fileSizeBytes)
+                val sizeText = formatFileSize(record.fileSizeBytes)
                 Text(sizeText, style = MaterialTheme.typography.labelMedium)
                 Surface(
                     color = if (record.status == UploadResultStatus.SUCCESS)
@@ -74,13 +75,3 @@ fun HistoryItem(record: UploadRecord, modifier: Modifier = Modifier) {
     }
 }
 
-private fun formatSize(bytes: Long): String {
-    val kb = bytes / 1024.0
-    val mb = kb / 1024.0
-    val gb = mb / 1024.0
-    return when {
-        gb >= 1 -> "%.1f GB".format(gb)
-        mb >= 1 -> "%.1f MB".format(mb)
-        else -> "%.0f KB".format(kb)
-    }
-}

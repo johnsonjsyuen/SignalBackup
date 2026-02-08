@@ -1,10 +1,12 @@
 package com.johnsonyuen.signalbackup.ui.screen.settings
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.johnsonyuen.signalbackup.data.repository.DriveFolder
+import com.johnsonyuen.signalbackup.domain.model.DriveFolder
 import com.johnsonyuen.signalbackup.data.repository.DriveRepository
 import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
+import com.johnsonyuen.signalbackup.domain.model.ThemeMode
 import com.johnsonyuen.signalbackup.domain.usecase.ScheduleUploadUseCase
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.*
@@ -36,11 +38,18 @@ class SettingsViewModel @Inject constructor(
     val googleAccountEmail: StateFlow<String?> = settingsRepository.googleAccountEmail
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
+    val themeMode: StateFlow<ThemeMode> = settingsRepository.themeMode
+        .map { ThemeMode.fromString(it) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ThemeMode.SYSTEM)
+
     private val _driveFolders = MutableStateFlow<List<DriveFolder>>(emptyList())
     val driveFolders: StateFlow<List<DriveFolder>> = _driveFolders.asStateFlow()
 
     private val _isLoadingFolders = MutableStateFlow(false)
     val isLoadingFolders: StateFlow<Boolean> = _isLoadingFolders.asStateFlow()
+
+    private val _driveError = MutableStateFlow<String?>(null)
+    val driveError: StateFlow<String?> = _driveError.asStateFlow()
 
     private val _folderStack = MutableStateFlow<List<DriveFolder>>(emptyList())
     val currentDriveFolder: StateFlow<DriveFolder?> = _folderStack
@@ -68,8 +77,7 @@ class SettingsViewModel @Inject constructor(
 
     fun setScheduleTime(hour: Int, minute: Int) {
         viewModelScope.launch {
-            settingsRepository.setScheduleHour(hour)
-            settingsRepository.setScheduleMinute(minute)
+            settingsRepository.setScheduleTime(hour, minute)
             scheduleUploadUseCase()
         }
     }
@@ -77,12 +85,16 @@ class SettingsViewModel @Inject constructor(
     fun loadDriveFolders(parentId: String? = null) {
         viewModelScope.launch {
             _isLoadingFolders.value = true
+            _driveError.value = null
             try {
                 _driveFolders.value = driveRepository.listFolders(parentId)
             } catch (e: Exception) {
+                Log.e(TAG, "Failed to list Drive folders", e)
                 _driveFolders.value = emptyList()
+                _driveError.value = "Failed to load folders: ${e.message}"
+            } finally {
+                _isLoadingFolders.value = false
             }
-            _isLoadingFolders.value = false
         }
     }
 
@@ -93,14 +105,20 @@ class SettingsViewModel @Inject constructor(
 
     fun createFolder(name: String) {
         viewModelScope.launch {
+            _driveError.value = null
             try {
                 val parentId = _folderStack.value.lastOrNull()?.id
                 driveRepository.createFolder(name, parentId)
                 loadDriveFolders(parentId)
-            } catch (_: Exception) {
-                // Folder creation failed silently — folders list unchanged
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create Drive folder '$name'", e)
+                _driveError.value = "Failed to create folder: ${e.message}"
             }
         }
+    }
+
+    fun clearDriveError() {
+        _driveError.value = null
     }
 
     fun navigateUp() {
@@ -111,11 +129,19 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun setThemeMode(mode: ThemeMode) {
+        viewModelScope.launch {
+            settingsRepository.setThemeMode(mode.name)
+        }
+    }
+
     fun signOut() {
         viewModelScope.launch {
-            settingsRepository.setGoogleAccountEmail(null)
-            settingsRepository.setDriveFolderId(null)
-            settingsRepository.setDriveFolderName(null)
+            settingsRepository.clearAccountData()
         }
+    }
+
+    companion object {
+        private const val TAG = "SettingsViewModel"
     }
 }

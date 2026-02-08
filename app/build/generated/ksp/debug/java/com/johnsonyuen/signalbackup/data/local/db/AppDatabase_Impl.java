@@ -16,6 +16,7 @@ import java.lang.Override;
 import java.lang.String;
 import java.lang.SuppressWarnings;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -31,12 +32,13 @@ public final class AppDatabase_Impl extends AppDatabase {
   @Override
   @NonNull
   protected SupportSQLiteOpenHelper createOpenHelper(@NonNull final DatabaseConfiguration config) {
-    final SupportSQLiteOpenHelper.Callback _openCallback = new RoomOpenHelper(config, new RoomOpenHelper.Delegate(1) {
+    final SupportSQLiteOpenHelper.Callback _openCallback = new RoomOpenHelper(config, new RoomOpenHelper.Delegate(2) {
       @Override
       public void createAllTables(@NonNull final SupportSQLiteDatabase db) {
         db.execSQL("CREATE TABLE IF NOT EXISTS `upload_history` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `timestamp` INTEGER NOT NULL, `fileName` TEXT NOT NULL, `fileSizeBytes` INTEGER NOT NULL, `status` TEXT NOT NULL, `errorMessage` TEXT, `driveFolderId` TEXT NOT NULL, `driveFileId` TEXT)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS `index_upload_history_timestamp` ON `upload_history` (`timestamp`)");
         db.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)");
-        db.execSQL("INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'ee002079c94305fe1441c1076178524f')");
+        db.execSQL("INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'c21c99b139ee190c9079c9f8054958ea')");
       }
 
       @Override
@@ -95,7 +97,8 @@ public final class AppDatabase_Impl extends AppDatabase {
         _columnsUploadHistory.put("driveFolderId", new TableInfo.Column("driveFolderId", "TEXT", true, 0, null, TableInfo.CREATED_FROM_ENTITY));
         _columnsUploadHistory.put("driveFileId", new TableInfo.Column("driveFileId", "TEXT", false, 0, null, TableInfo.CREATED_FROM_ENTITY));
         final HashSet<TableInfo.ForeignKey> _foreignKeysUploadHistory = new HashSet<TableInfo.ForeignKey>(0);
-        final HashSet<TableInfo.Index> _indicesUploadHistory = new HashSet<TableInfo.Index>(0);
+        final HashSet<TableInfo.Index> _indicesUploadHistory = new HashSet<TableInfo.Index>(1);
+        _indicesUploadHistory.add(new TableInfo.Index("index_upload_history_timestamp", false, Arrays.asList("timestamp"), Arrays.asList("ASC")));
         final TableInfo _infoUploadHistory = new TableInfo("upload_history", _columnsUploadHistory, _foreignKeysUploadHistory, _indicesUploadHistory);
         final TableInfo _existingUploadHistory = TableInfo.read(db, "upload_history");
         if (!_infoUploadHistory.equals(_existingUploadHistory)) {
@@ -105,7 +108,7 @@ public final class AppDatabase_Impl extends AppDatabase {
         }
         return new RoomOpenHelper.ValidationResult(true, null);
       }
-    }, "ee002079c94305fe1441c1076178524f", "115dba58183bddaa0a2bd4c3231c904b");
+    }, "c21c99b139ee190c9079c9f8054958ea", "d83825bc96316033f45713ca717ecade");
     final SupportSQLiteOpenHelper.Configuration _sqliteConfig = SupportSQLiteOpenHelper.Configuration.builder(config.context).name(config.name).callback(_openCallback).build();
     final SupportSQLiteOpenHelper _helper = config.sqliteOpenHelperFactory.create(_sqliteConfig);
     return _helper;

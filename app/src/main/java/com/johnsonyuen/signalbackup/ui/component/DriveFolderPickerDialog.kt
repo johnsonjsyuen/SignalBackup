@@ -13,7 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.johnsonyuen.signalbackup.data.repository.DriveFolder
+import com.johnsonyuen.signalbackup.domain.model.DriveFolder
 
 @Composable
 fun DriveFolderPickerDialog(

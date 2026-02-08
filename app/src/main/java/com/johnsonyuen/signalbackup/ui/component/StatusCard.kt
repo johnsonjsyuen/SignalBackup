@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
+import com.johnsonyuen.signalbackup.util.formatFileSize
 
 @Composable
 fun StatusCard(status: UploadStatus, modifier: Modifier = Modifier) {
@@ -94,13 +95,3 @@ fun StatusCard(status: UploadStatus, modifier: Modifier = Modifier) {
     }
 }
 
-private fun formatFileSize(bytes: Long): String {
-    val kb = bytes / 1024.0
-    val mb = kb / 1024.0
-    val gb = mb / 1024.0
-    return when {
-        gb >= 1 -> "%.1f GB".format(gb)
-        mb >= 1 -> "%.1f MB".format(mb)
-        else -> "%.0f KB".format(kb)
-    }
-}
