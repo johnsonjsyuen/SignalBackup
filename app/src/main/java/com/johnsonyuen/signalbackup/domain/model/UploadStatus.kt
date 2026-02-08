@@ -56,7 +56,7 @@ sealed interface UploadStatus {
      * can proceed. The UI should launch the [consentIntent] to show Google's consent dialog.
      *
      * This state occurs when GoogleAccountCredential's OAuth token is expired or the
-     * DRIVE_FILE scope hasn't been granted yet. After the user grants consent, the
+     * DRIVE scope hasn't been granted yet. After the user grants consent, the
      * upload should be retried.
      *
      * @property consentIntent An Android Intent that launches Google's OAuth consent screen.

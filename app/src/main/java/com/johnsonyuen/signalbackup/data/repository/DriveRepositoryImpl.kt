@@ -37,8 +37,10 @@ class DriveRepositoryImpl @Inject constructor(
         fileName: String,
         mimeType: String,
         inputStream: InputStream,
+        fileSize: Long,
+        progressListener: UploadProgressListener?,
     ): String {
-        return driveService.uploadFile(folderId, fileName, mimeType, inputStream)
+        return driveService.uploadFile(folderId, fileName, mimeType, inputStream, fileSize, progressListener)
     }
 
     /** Delegates folder listing to [GoogleDriveService.listFolders]. */
@@ -49,5 +51,33 @@ class DriveRepositoryImpl @Inject constructor(
     /** Delegates folder creation to [GoogleDriveService.createFolder]. */
     override suspend fun createFolder(name: String, parentId: String?): DriveFolder {
         return driveService.createFolder(name, parentId)
+    }
+
+    /** Delegates resumable upload initiation to [GoogleDriveService.initiateResumableUpload]. */
+    override suspend fun initiateResumableUpload(
+        folderId: String,
+        fileName: String,
+        mimeType: String,
+        totalBytes: Long,
+    ): String {
+        return driveService.initiateResumableUpload(folderId, fileName, mimeType, totalBytes)
+    }
+
+    /** Delegates chunk upload to [GoogleDriveService.uploadChunk]. */
+    override suspend fun uploadChunk(
+        sessionUri: String,
+        chunkData: ByteArray,
+        offset: Long,
+        totalBytes: Long,
+    ): GoogleDriveService.ChunkUploadResult {
+        return driveService.uploadChunk(sessionUri, chunkData, offset, totalBytes)
+    }
+
+    /** Delegates session progress query to [GoogleDriveService.querySessionProgress]. */
+    override suspend fun querySessionProgress(
+        sessionUri: String,
+        totalBytes: Long,
+    ): Long {
+        return driveService.querySessionProgress(sessionUri, totalBytes)
     }
 }

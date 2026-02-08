@@ -36,8 +36,11 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import com.johnsonyuen.signalbackup.domain.model.ResumableUploadSession
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 
@@ -77,6 +80,31 @@ class SettingsDataStore(
 
         /** Theme mode string ("SYSTEM", "LIGHT", or "DARK") for user appearance preference. */
         val THEME_MODE = stringPreferencesKey("theme_mode")
+
+        // ---- Resumable upload session keys ----
+        // These keys persist the state of an in-progress resumable upload so it can
+        // be resumed after the app is killed and restarted.
+
+        /** The resumable session URI issued by Google Drive for chunk uploads. */
+        val RESUME_SESSION_URI = stringPreferencesKey("resume_session_uri")
+
+        /** The SAF content URI of the local file being uploaded. */
+        val RESUME_LOCAL_FILE_URI = stringPreferencesKey("resume_local_file_uri")
+
+        /** The display name of the file being uploaded. */
+        val RESUME_FILE_NAME = stringPreferencesKey("resume_file_name")
+
+        /** Number of bytes confirmed received by Google Drive so far. */
+        val RESUME_BYTES_UPLOADED = longPreferencesKey("resume_bytes_uploaded")
+
+        /** Total size of the file being uploaded in bytes. */
+        val RESUME_TOTAL_BYTES = longPreferencesKey("resume_total_bytes")
+
+        /** The Google Drive folder ID the file is being uploaded to. */
+        val RESUME_DRIVE_FOLDER_ID = stringPreferencesKey("resume_drive_folder_id")
+
+        /** Epoch millis when the resumable session was initiated. */
+        val RESUME_CREATED_AT = longPreferencesKey("resume_created_at")
     }
 
     // ---- Defaults ----
@@ -225,5 +253,90 @@ class SettingsDataStore(
      */
     suspend fun setThemeMode(mode: String) {
         dataStore.edit { prefs -> prefs[Keys.THEME_MODE] = mode }
+    }
+
+    // ---- Resumable upload session persistence ----
+    // These methods save and restore the state of an in-progress resumable upload.
+    // All session fields are written/cleared atomically to prevent inconsistent state.
+
+    /**
+     * Reads the saved resumable upload session, or null if none exists.
+     *
+     * This is a one-shot read (not a Flow) because the session is only checked at the
+     * start of an upload attempt, not observed reactively.
+     *
+     * @return The saved [ResumableUploadSession], or null if no session is saved.
+     */
+    suspend fun getResumableSession(): ResumableUploadSession? {
+        val prefs = dataStore.data.first()
+        val sessionUri = prefs[Keys.RESUME_SESSION_URI] ?: return null
+        val localFileUri = prefs[Keys.RESUME_LOCAL_FILE_URI] ?: return null
+        val fileName = prefs[Keys.RESUME_FILE_NAME] ?: return null
+        val bytesUploaded = prefs[Keys.RESUME_BYTES_UPLOADED] ?: return null
+        val totalBytes = prefs[Keys.RESUME_TOTAL_BYTES] ?: return null
+        val driveFolderId = prefs[Keys.RESUME_DRIVE_FOLDER_ID] ?: return null
+        val createdAt = prefs[Keys.RESUME_CREATED_AT] ?: return null
+
+        return ResumableUploadSession(
+            sessionUri = sessionUri,
+            localFileUri = localFileUri,
+            fileName = fileName,
+            bytesUploaded = bytesUploaded,
+            totalBytes = totalBytes,
+            driveFolderId = driveFolderId,
+            createdAtMillis = createdAt,
+        )
+    }
+
+    /**
+     * Atomically saves all fields of a resumable upload session.
+     *
+     * Called after initiating a new resumable upload and after each successful chunk
+     * upload to persist the latest bytes-uploaded count.
+     *
+     * @param session The session state to persist.
+     */
+    suspend fun saveResumableSession(session: ResumableUploadSession) {
+        dataStore.edit { prefs ->
+            prefs[Keys.RESUME_SESSION_URI] = session.sessionUri
+            prefs[Keys.RESUME_LOCAL_FILE_URI] = session.localFileUri
+            prefs[Keys.RESUME_FILE_NAME] = session.fileName
+            prefs[Keys.RESUME_BYTES_UPLOADED] = session.bytesUploaded
+            prefs[Keys.RESUME_TOTAL_BYTES] = session.totalBytes
+            prefs[Keys.RESUME_DRIVE_FOLDER_ID] = session.driveFolderId
+            prefs[Keys.RESUME_CREATED_AT] = session.createdAtMillis
+        }
+    }
+
+    /**
+     * Updates only the bytes-uploaded count in a saved session.
+     *
+     * This is more efficient than [saveResumableSession] when only the progress
+     * changes (i.e., after each chunk upload).
+     *
+     * @param bytesUploaded The new confirmed byte count.
+     */
+    suspend fun updateResumableBytesUploaded(bytesUploaded: Long) {
+        dataStore.edit { prefs ->
+            prefs[Keys.RESUME_BYTES_UPLOADED] = bytesUploaded
+        }
+    }
+
+    /**
+     * Atomically clears all resumable session fields.
+     *
+     * Called when the upload completes successfully, fails permanently, or the
+     * session URI is detected as expired.
+     */
+    suspend fun clearResumableSession() {
+        dataStore.edit { prefs ->
+            prefs.remove(Keys.RESUME_SESSION_URI)
+            prefs.remove(Keys.RESUME_LOCAL_FILE_URI)
+            prefs.remove(Keys.RESUME_FILE_NAME)
+            prefs.remove(Keys.RESUME_BYTES_UPLOADED)
+            prefs.remove(Keys.RESUME_TOTAL_BYTES)
+            prefs.remove(Keys.RESUME_DRIVE_FOLDER_ID)
+            prefs.remove(Keys.RESUME_CREATED_AT)
+        }
     }
 }

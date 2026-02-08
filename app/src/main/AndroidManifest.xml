@@ -1,11 +1,49 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  AndroidManifest.xml - Application manifest declaring permissions, components, and configuration.
+
+  This file tells the Android system everything it needs to know about the app:
+  - What permissions it requires.
+  - What components it contains (Activities, Services, Providers).
+  - How to launch the app (intent filters).
+  - Custom initialization overrides (WorkManager).
+
+  Permissions:
+  - INTERNET: Required for Google Drive API calls (uploading files, listing folders).
+  - FOREGROUND_SERVICE: Required to promote the UploadWorker to a foreground service
+    so it can show a notification during long-running uploads (Android 8+ requirement).
+  - FOREGROUND_SERVICE_DATA_SYNC: Android 14+ requires declaring the specific foreground
+    service type. DATA_SYNC indicates the service is syncing data to the cloud.
+  - POST_NOTIFICATIONS: Android 13+ requires runtime permission to show notifications.
+    The foreground service notification needs this permission.
+
+  WorkManager initialization:
+  By default, WorkManager is initialized automatically via the AndroidX Startup library
+  (InitializationProvider). We DISABLE this default initializer because we need Hilt-based
+  initialization to support @HiltWorker dependency injection. Instead, our custom
+  Application class (SignalBackupApp) implements Configuration.Provider and provides
+  the WorkManager configuration with HiltWorkerFactory.
+  The tools:node="remove" attribute on the meta-data element removes the default
+  initializer from the merged manifest.
+
+  @see SignalBackupApp for the custom WorkManager initialization
+  @see worker.UploadWorker for the foreground service that uses these permissions
+-->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Network access for Google Drive API calls. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Required to run the upload worker as a foreground service with a notification. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14+ requires declaring the foreground service type (data sync = cloud upload). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 13+ requires permission to show notifications (used by the upload worker). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Required to acquire a WakeLock so the CPU stays awake during large uploads. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Required to acquire a WiFi lock so the network stays active during large uploads. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <application
         android:name=".SignalBackupApp"
@@ -15,7 +53,14 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.SignalBackup">
 
-        <!-- Disable default WorkManager initializer; we use Hilt -->
+        <!--
+          Disable the default WorkManager initializer.
+          WorkManager normally auto-initializes via AndroidX Startup's InitializationProvider.
+          We override this because we need Hilt-based initialization (HiltWorkerFactory)
+          to support dependency injection in our @HiltWorker UploadWorker.
+          tools:node="merge" merges our changes into the provider declaration.
+          tools:node="remove" on the meta-data element removes the specific initializer.
+        -->
         <provider
             android:name="androidx.startup.InitializationProvider"
             android:authorities="${applicationId}.androidx-startup"
@@ -27,6 +72,11 @@
                 tools:node="remove" />
         </provider>
 
+        <!--
+          The single Activity that hosts the entire Compose UI.
+          android:exported="true" is required for the LAUNCHER intent filter.
+          The intent filter makes this the app's launch Activity.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -1,35 +1,31 @@
 /**
  * PerformUploadUseCase.kt - Core business logic for uploading a backup file to Google Drive.
  *
- * This use case orchestrates the entire upload flow:
- * 1. Read settings (local folder URI, Drive folder ID) from the repository.
- * 2. Use SAF (Storage Access Framework) to find the most recent .backup file.
- * 3. Open an InputStream to the file via ContentResolver.
- * 4. Upload the file to Google Drive via the DriveRepository.
- * 5. Record the result (success or failure) in the upload history database.
+ * This use case orchestrates the entire upload flow with **resumable upload** support:
+ * 1. Check for a saved resumable session from a previous interrupted upload.
+ * 2. If a valid session exists, verify it with Google and resume from the last confirmed byte.
+ * 3. If no session exists (or the saved one expired), find the latest .backup file and
+ *    initiate a new resumable upload session.
+ * 4. Upload the file in chunks, saving progress to DataStore after each chunk.
+ * 5. On success, clear the saved session and record the result in upload history.
+ * 6. On failure, leave the session saved so it can be resumed on the next attempt.
  *
- * The use case is invoked as a function via Kotlin's `operator fun invoke()` convention,
- * which is a common pattern for single-purpose use case classes in clean architecture.
+ * The resumable upload protocol allows uploads to survive app kills and WorkManager retries.
+ * Google Drive keeps resumable session URIs valid for approximately one week, so even if
+ * the device is offline for days, the upload can resume where it left off.
  *
  * Error handling:
- * - [UserRecoverableAuthIOException]: The Google Drive SDK throws this when OAuth consent
- *   is needed. We catch it and return [UploadStatus.NeedsConsent] so the UI can launch
- *   the consent dialog.
- * - General exceptions: Caught, logged, recorded in history as failed, and returned as
- *   [UploadStatus.Failed].
+ * - [UserRecoverableAuthIOException]: Caught and returned as [UploadStatus.NeedsConsent].
+ * - Transient errors during chunk upload: The session remains saved; WorkManager will
+ *   retry and the next attempt will resume from the last confirmed byte.
+ * - Session expired (404): The saved session is cleared and a fresh upload starts.
  *
- * Threading: The entire operation runs on [Dispatchers.IO] because it involves file I/O
- * (SAF DocumentFile operations), network I/O (Drive upload), and database I/O (history insert).
- * Running on IO prevents ANR (Application Not Responding) errors.
- *
- * Architecture context:
- * - Part of the **domain layer** (domain/usecase package).
- * - Called by [HomeViewModel.uploadNow()] for manual uploads and [UploadWorker.doWork()]
- *   for scheduled background uploads.
+ * Threading: Runs on [Dispatchers.IO] for file I/O, network I/O, and database I/O.
  *
  * @see domain.model.UploadStatus for the possible return states
+ * @see domain.model.ResumableUploadSession for the persisted session state
+ * @see data.remote.GoogleDriveService for the resumable upload protocol implementation
  * @see worker.UploadWorker for the background execution context
- * @see ui.screen.home.HomeViewModel for the manual execution context
  */
 package com.johnsonyuen.signalbackup.domain.usecase
 
@@ -39,61 +35,87 @@ import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import com.google.api.client.googleapis.extensions.android.gms.auth.UserRecoverableAuthIOException
 import com.johnsonyuen.signalbackup.data.local.entity.UploadHistoryEntity
+import com.johnsonyuen.signalbackup.data.remote.GoogleDriveService
 import com.johnsonyuen.signalbackup.data.repository.DriveRepository
 import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
 import com.johnsonyuen.signalbackup.data.repository.UploadHistoryRepository
+import com.johnsonyuen.signalbackup.data.repository.UploadProgressListener
+import com.johnsonyuen.signalbackup.domain.model.ResumableUploadSession
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import java.io.InputStream
 import javax.inject.Inject
 
 /**
  * Use case that finds the latest .backup file in the configured local folder
- * and uploads it to the configured Google Drive folder.
+ * and uploads it to the configured Google Drive folder, with support for
+ * resuming interrupted uploads across app restarts.
  *
- * @param settingsRepository For reading the local folder URI and Drive folder ID.
+ * @param settingsRepository For reading settings and persisting resumable session state.
  * @param driveRepository For uploading the file to Google Drive.
  * @param uploadHistoryRepository For recording the upload result in the local database.
  */
 class PerformUploadUseCase @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val driveRepository: DriveRepository,
-    private val uploadHistoryRepository: UploadHistoryRepository
+    private val uploadHistoryRepository: UploadHistoryRepository,
 ) {
     /**
-     * Performs the upload operation.
-     *
-     * This is an `operator fun invoke` so it can be called as `performUploadUseCase(context)`.
+     * Performs the upload operation, resuming from a saved session if one exists.
      *
      * @param context Android Context needed for SAF (DocumentFile.fromTreeUri) and
      *        ContentResolver (opening file InputStreams). Uses ApplicationContext to
      *        avoid Activity lifecycle issues.
+     * @param progressListener Optional callback invoked as chunks are uploaded to Drive.
+     *        Receives bytes uploaded so far and total file size in bytes.
      * @return The resulting [UploadStatus] indicating success, failure, or consent needed.
      */
-    suspend operator fun invoke(context: Context): UploadStatus = withContext(Dispatchers.IO) {
-        Log.d(TAG, "Starting upload")
+    suspend operator fun invoke(
+        context: Context,
+        progressListener: UploadProgressListener? = null,
+    ): UploadStatus = withContext(Dispatchers.IO) {
+        Log.d(TAG, "Starting upload (checking for resumable session)")
 
         // Step 1: Read the configured folders from settings.
-        // .first() suspends until the DataStore emits its first value, then returns it.
         val localFolderUri = settingsRepository.localFolderUri.first()
         val driveFolderId = settingsRepository.driveFolderId.first()
 
-        // Validate that both folders are configured before attempting the upload.
         if (localFolderUri == null || driveFolderId == null) {
-            return@withContext UploadStatus.Failed("Configuration incomplete — set local folder and Drive folder")
+            return@withContext UploadStatus.Failed(
+                "Configuration incomplete — set local folder and Drive folder"
+            )
         }
 
         try {
-            // Step 2: Access the local folder via SAF (Storage Access Framework).
-            // DocumentFile.fromTreeUri creates a virtual file system view of the
-            // directory the user selected via the folder picker.
+            // Step 2: Check for a saved resumable session from a previous interrupted upload.
+            val savedSession = settingsRepository.getResumableSession()
+            val resumeResult = savedSession?.let { session ->
+                tryResumeUpload(context, session, driveFolderId, progressListener)
+            }
+
+            when (resumeResult) {
+                // Resume succeeded -- return the success status.
+                is ResumeAttemptResult.Completed -> {
+                    return@withContext resumeResult.status
+                }
+                // Resume is not possible (expired, different file, etc.) -- start fresh.
+                is ResumeAttemptResult.SessionInvalid -> {
+                    Log.d(TAG, "Saved session invalid: ${resumeResult.reason}. Starting fresh.")
+                    settingsRepository.clearResumableSession()
+                }
+                // No saved session -- start fresh.
+                null -> {
+                    Log.d(TAG, "No saved session found. Starting fresh upload.")
+                }
+            }
+
+            // Step 3: Find the latest .backup file via SAF.
             val uri = Uri.parse(localFolderUri)
             val folder = DocumentFile.fromTreeUri(context, uri)
                 ?: return@withContext UploadStatus.Failed("Cannot access local folder")
 
-            // Step 3: Find the most recent .backup file by modification time.
-            // Signal creates timestamped backup files, so we want the latest one.
             val latestBackup = folder.listFiles()
                 .filter { it.isFile && it.name?.endsWith(".backup") == true }
                 .maxByOrNull { it.lastModified() }
@@ -102,18 +124,43 @@ class PerformUploadUseCase @Inject constructor(
             val fileName = latestBackup.name ?: "unknown.backup"
             val fileSize = latestBackup.length()
 
-            // Step 4: Open an InputStream to read the file content.
-            // ContentResolver is needed because SAF uses content:// URIs, not direct file paths.
+            // Step 4: Initiate a new resumable upload session with Google Drive.
+            val sessionUri = driveRepository.initiateResumableUpload(
+                folderId = driveFolderId,
+                fileName = fileName,
+                mimeType = MIME_TYPE,
+                totalBytes = fileSize,
+            )
+
+            // Save the session immediately so it can be resumed if we are killed.
+            val session = ResumableUploadSession(
+                sessionUri = sessionUri,
+                localFileUri = latestBackup.uri.toString(),
+                fileName = fileName,
+                bytesUploaded = 0L,
+                totalBytes = fileSize,
+                driveFolderId = driveFolderId,
+                createdAtMillis = System.currentTimeMillis(),
+            )
+            settingsRepository.saveResumableSession(session)
+
+            // Step 5: Upload the file in chunks.
             val inputStream = context.contentResolver.openInputStream(latestBackup.uri)
                 ?: return@withContext UploadStatus.Failed("Cannot open backup file")
 
-            // Step 5: Upload to Google Drive. The InputStream is consumed by this call.
-            // .use {} ensures the stream is closed even if the upload throws an exception.
             val driveFileId = inputStream.use { stream ->
-                driveRepository.uploadFile(driveFolderId, fileName, "application/octet-stream", stream)
+                uploadChunked(
+                    sessionUri = sessionUri,
+                    inputStream = stream,
+                    offset = 0L,
+                    totalBytes = fileSize,
+                    progressListener = progressListener,
+                )
             }
 
-            // Step 6: Record the successful upload in the history database.
+            // Step 6: Upload complete -- clear session and record success.
+            settingsRepository.clearResumableSession()
+
             uploadHistoryRepository.insert(
                 UploadHistoryEntity(
                     timestamp = System.currentTimeMillis(),
@@ -122,23 +169,22 @@ class PerformUploadUseCase @Inject constructor(
                     status = UploadHistoryEntity.STATUS_SUCCESS,
                     errorMessage = null,
                     driveFolderId = driveFolderId,
-                    driveFileId = driveFileId
+                    driveFileId = driveFileId,
                 )
             )
 
             UploadStatus.Success(fileName = fileName, fileSizeBytes = fileSize)
+
         } catch (e: UserRecoverableAuthIOException) {
-            // The Drive SDK throws this when the OAuth token is expired or the
-            // DRIVE_FILE scope hasn't been granted. Return NeedsConsent so the UI
-            // can launch the consent Intent for the user to approve.
             Log.w(TAG, "Drive consent needed", e)
             UploadStatus.NeedsConsent(e.intent)
         } catch (e: Exception) {
-            // Any other error (network failure, Drive quota exceeded, etc.)
-            Log.e(TAG, "Upload failed", e)
+            // Transient error -- leave the session saved so it can be resumed.
+            // The saved session in DataStore persists the progress, and the next
+            // WorkManager retry will pick up where we left off.
+            Log.e(TAG, "Upload failed (session preserved for retry)", e)
             val errorMsg = "${e.javaClass.simpleName}: ${e.message ?: "no details"}"
 
-            // Record the failed upload in history for the user to see.
             uploadHistoryRepository.insert(
                 UploadHistoryEntity(
                     timestamp = System.currentTimeMillis(),
@@ -147,14 +193,299 @@ class PerformUploadUseCase @Inject constructor(
                     status = UploadHistoryEntity.STATUS_FAILED,
                     errorMessage = errorMsg,
                     driveFolderId = driveFolderId,
-                    driveFileId = null
+                    driveFileId = null,
                 )
             )
             UploadStatus.Failed(errorMsg)
         }
     }
 
+    /**
+     * Attempts to resume an upload from a saved session.
+     *
+     * Validates that the session matches the current configuration and that the same
+     * local file still exists. Queries Google Drive for the actual bytes received to
+     * get the authoritative resume offset.
+     *
+     * @param context Android Context for SAF file access.
+     * @param session The saved resumable upload session.
+     * @param currentDriveFolderId The currently configured Drive folder ID.
+     * @param progressListener Optional progress callback.
+     * @return [ResumeAttemptResult.Completed] if the resume succeeded,
+     *         [ResumeAttemptResult.SessionInvalid] if the session cannot be resumed.
+     */
+    private suspend fun tryResumeUpload(
+        context: Context,
+        session: ResumableUploadSession,
+        currentDriveFolderId: String,
+        progressListener: UploadProgressListener?,
+    ): ResumeAttemptResult {
+        // Check if the session is too old (Google keeps session URIs for ~1 week).
+        if (session.isExpired()) {
+            return ResumeAttemptResult.SessionInvalid("Session expired (older than 6 days)")
+        }
+
+        // Check if the Drive folder has changed since the session was created.
+        if (session.driveFolderId != currentDriveFolderId) {
+            return ResumeAttemptResult.SessionInvalid(
+                "Drive folder changed (was ${session.driveFolderId}, now $currentDriveFolderId)"
+            )
+        }
+
+        // Verify the local file still exists and matches the session.
+        val localFileUri = Uri.parse(session.localFileUri)
+        val localFile = try {
+            DocumentFile.fromSingleUri(context, localFileUri)
+        } catch (e: Exception) {
+            Log.w(TAG, "Cannot access saved file URI: ${session.localFileUri}", e)
+            null
+        }
+
+        if (localFile == null || !localFile.exists()) {
+            return ResumeAttemptResult.SessionInvalid("Local file no longer exists")
+        }
+
+        // Verify the file size matches (the file may have been replaced with a newer backup).
+        val currentFileSize = localFile.length()
+        if (currentFileSize != session.totalBytes) {
+            return ResumeAttemptResult.SessionInvalid(
+                "File size changed (was ${session.totalBytes}, now $currentFileSize)"
+            )
+        }
+
+        // Query Google Drive for the actual number of bytes received.
+        val confirmedBytes = driveRepository.querySessionProgress(
+            sessionUri = session.sessionUri,
+            totalBytes = session.totalBytes,
+        )
+
+        if (confirmedBytes < 0) {
+            // Session URI is expired or invalid (404 from Google).
+            return ResumeAttemptResult.SessionInvalid("Server rejected session URI (likely expired)")
+        }
+
+        if (confirmedBytes >= session.totalBytes) {
+            // The upload was already completed in a previous attempt! Clear session.
+            Log.d(TAG, "Session query shows upload already complete")
+            settingsRepository.clearResumableSession()
+            // We do not have the Drive file ID from the query response, so we cannot
+            // record it in history. Record a success without the file ID.
+            uploadHistoryRepository.insert(
+                UploadHistoryEntity(
+                    timestamp = System.currentTimeMillis(),
+                    fileName = session.fileName,
+                    fileSizeBytes = session.totalBytes,
+                    status = UploadHistoryEntity.STATUS_SUCCESS,
+                    errorMessage = null,
+                    driveFolderId = session.driveFolderId,
+                    driveFileId = null,
+                )
+            )
+            return ResumeAttemptResult.Completed(
+                UploadStatus.Success(
+                    fileName = session.fileName,
+                    fileSizeBytes = session.totalBytes,
+                )
+            )
+        }
+
+        // Resume from the confirmed byte offset.
+        Log.d(TAG, "Resuming upload from byte $confirmedBytes / ${session.totalBytes}")
+
+        // Update the saved session with the server-confirmed byte count.
+        settingsRepository.updateResumableBytesUploaded(confirmedBytes)
+
+        // Open the file and skip to the resume offset.
+        val inputStream = context.contentResolver.openInputStream(localFileUri)
+            ?: return ResumeAttemptResult.SessionInvalid("Cannot open backup file for resume")
+
+        val driveFileId = inputStream.use { stream ->
+            // Skip past the bytes that are already uploaded.
+            skipBytes(stream, confirmedBytes)
+
+            uploadChunked(
+                sessionUri = session.sessionUri,
+                inputStream = stream,
+                offset = confirmedBytes,
+                totalBytes = session.totalBytes,
+                progressListener = progressListener,
+            )
+        }
+
+        // Upload complete -- clear session and record success.
+        settingsRepository.clearResumableSession()
+
+        uploadHistoryRepository.insert(
+            UploadHistoryEntity(
+                timestamp = System.currentTimeMillis(),
+                fileName = session.fileName,
+                fileSizeBytes = session.totalBytes,
+                status = UploadHistoryEntity.STATUS_SUCCESS,
+                errorMessage = null,
+                driveFolderId = session.driveFolderId,
+                driveFileId = driveFileId,
+            )
+        )
+
+        return ResumeAttemptResult.Completed(
+            UploadStatus.Success(
+                fileName = session.fileName,
+                fileSizeBytes = session.totalBytes,
+            )
+        )
+    }
+
+    /**
+     * Uploads a file to Google Drive in chunks via the resumable upload protocol.
+     *
+     * Reads the InputStream in [CHUNK_SIZE]-byte blocks and uploads each one to the
+     * session URI. After each successful chunk, the confirmed byte count is persisted
+     * to DataStore so a future retry can resume from that point.
+     *
+     * @param sessionUri The resumable session URI.
+     * @param inputStream The file content stream, positioned at [offset].
+     * @param offset The byte offset to start uploading from.
+     * @param totalBytes The total file size in bytes.
+     * @param progressListener Optional progress callback.
+     * @return The Google Drive file ID of the completed upload.
+     */
+    private suspend fun uploadChunked(
+        sessionUri: String,
+        inputStream: InputStream,
+        offset: Long,
+        totalBytes: Long,
+        progressListener: UploadProgressListener?,
+    ): String {
+        var currentOffset = offset
+        val buffer = ByteArray(CHUNK_SIZE)
+
+        // Report initial progress (important for resumed uploads so UI shows where we are).
+        progressListener?.invoke(currentOffset, totalBytes)
+
+        while (currentOffset < totalBytes) {
+            // Read up to CHUNK_SIZE bytes from the stream.
+            val bytesToRead = minOf(CHUNK_SIZE.toLong(), totalBytes - currentOffset).toInt()
+            val bytesRead = readFully(inputStream, buffer, bytesToRead)
+
+            if (bytesRead <= 0) {
+                throw IllegalStateException(
+                    "Unexpected end of stream at offset $currentOffset (expected $totalBytes bytes)"
+                )
+            }
+
+            // Upload this chunk. Use the exact bytes read (may be less than buffer size
+            // for the final chunk).
+            val chunkData = if (bytesRead < buffer.size) {
+                buffer.copyOf(bytesRead)
+            } else {
+                buffer
+            }
+
+            val result = driveRepository.uploadChunk(
+                sessionUri = sessionUri,
+                chunkData = chunkData,
+                offset = currentOffset,
+                totalBytes = totalBytes,
+            )
+
+            when (result) {
+                is GoogleDriveService.ChunkUploadResult.InProgress -> {
+                    currentOffset = result.confirmedBytes
+                    // Persist the updated byte count so a retry can resume here.
+                    settingsRepository.updateResumableBytesUploaded(currentOffset)
+                    progressListener?.invoke(currentOffset, totalBytes)
+                }
+                is GoogleDriveService.ChunkUploadResult.Complete -> {
+                    progressListener?.invoke(totalBytes, totalBytes)
+                    return result.driveFileId
+                }
+            }
+        }
+
+        // If we reach here, all bytes were uploaded but we did not get a 200 response.
+        // This should not happen with well-formed uploads, but handle it gracefully.
+        throw IllegalStateException(
+            "All $totalBytes bytes uploaded but server did not confirm completion"
+        )
+    }
+
+    /**
+     * Reads exactly [length] bytes from the InputStream into the buffer.
+     *
+     * InputStream.read() may return fewer bytes than requested. This method loops
+     * until the requested number of bytes is read or the stream ends.
+     *
+     * @param stream The input stream to read from.
+     * @param buffer The destination buffer.
+     * @param length The number of bytes to read.
+     * @return The actual number of bytes read, or -1 if the stream is at EOF.
+     */
+    private fun readFully(stream: InputStream, buffer: ByteArray, length: Int): Int {
+        var totalRead = 0
+        while (totalRead < length) {
+            val bytesRead = stream.read(buffer, totalRead, length - totalRead)
+            if (bytesRead < 0) {
+                return if (totalRead > 0) totalRead else -1
+            }
+            totalRead += bytesRead
+        }
+        return totalRead
+    }
+
+    /**
+     * Skips [bytesToSkip] bytes in the InputStream.
+     *
+     * InputStream.skip() may skip fewer bytes than requested. This method loops
+     * until all bytes are skipped. Falls back to reading and discarding if skip()
+     * returns 0 (which some InputStream implementations do).
+     *
+     * @param stream The input stream to skip in.
+     * @param bytesToSkip The number of bytes to skip.
+     * @throws IllegalStateException if the stream ends before all bytes are skipped.
+     */
+    private fun skipBytes(stream: InputStream, bytesToSkip: Long) {
+        var remaining = bytesToSkip
+        val skipBuffer = ByteArray(8192)
+        while (remaining > 0) {
+            val skipped = stream.skip(remaining)
+            if (skipped > 0) {
+                remaining -= skipped
+            } else {
+                // Some InputStreams return 0 from skip(). Fall back to reading.
+                val toRead = minOf(skipBuffer.size.toLong(), remaining).toInt()
+                val read = stream.read(skipBuffer, 0, toRead)
+                if (read < 0) {
+                    throw IllegalStateException(
+                        "Stream ended while skipping to resume offset " +
+                            "(skipped ${bytesToSkip - remaining} of $bytesToSkip bytes)"
+                    )
+                }
+                remaining -= read
+            }
+        }
+        Log.d(TAG, "Skipped $bytesToSkip bytes to resume offset")
+    }
+
+    /**
+     * Result of attempting to resume from a saved session.
+     */
+    private sealed interface ResumeAttemptResult {
+        /** The upload completed successfully via resume. */
+        data class Completed(val status: UploadStatus.Success) : ResumeAttemptResult
+
+        /** The saved session is invalid and cannot be resumed. */
+        data class SessionInvalid(val reason: String) : ResumeAttemptResult
+    }
+
     companion object {
         private const val TAG = "PerformUpload"
+        private const val MIME_TYPE = "application/octet-stream"
+
+        /**
+         * Chunk size for manual resumable uploads. Matches [GoogleDriveService.UPLOAD_CHUNK_SIZE]
+         * (5 MB). Must be a multiple of 256 KB per Google's requirements, except for the
+         * final chunk which can be any size.
+         */
+        private const val CHUNK_SIZE = GoogleDriveService.UPLOAD_CHUNK_SIZE
     }
 }

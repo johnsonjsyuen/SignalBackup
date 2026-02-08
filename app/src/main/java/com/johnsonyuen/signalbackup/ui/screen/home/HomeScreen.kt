@@ -1,3 +1,40 @@
+/**
+ * HomeScreen.kt - The main screen of the app, showing upload status and controls.
+ *
+ * This screen is the first thing the user sees. It displays:
+ * 1. A [StatusCard] showing the current upload status (idle, uploading, success, failed).
+ * 2. A [CountdownTimer] showing time until the next scheduled upload.
+ * 3. Quick-info chips for local folder and Drive folder selection status.
+ * 4. A "Sign In with Google" button (if not signed in) or "Upload Now" button (if signed in).
+ *
+ * Google Sign-In flow (implemented here, not in ViewModel):
+ * The sign-in flow involves launching Android Intents and receiving results, which is
+ * inherently tied to the Activity/UI layer. Here is the step-by-step:
+ * 1. User taps "Sign In with Google" -> requestSignIn() builds GoogleSignInOptions
+ *    with email and DRIVE scope, then launches the sign-in Intent.
+ * 2. signInLauncher receives the result -> extracts the email from the signed-in account.
+ * 3. If successful, the email is saved to DataStore via viewModel.setGoogleAccountEmail().
+ * 4. On subsequent uploads, if Google needs OAuth consent for Drive access, the upload
+ *    use case returns NeedsConsent with a consent Intent.
+ * 5. The LaunchedEffect watching uploadStatus detects NeedsConsent and launches
+ *    consentLauncher with the consent Intent.
+ * 6. If consent is granted, uploadNow() is called again to retry the upload.
+ *
+ * Key Compose concepts:
+ * - **collectAsStateWithLifecycle()**: Collects a Flow as Compose State in a lifecycle-aware
+ *   way. Stops collection when the UI is not visible (saves resources).
+ * - **hiltViewModel()**: Creates or retrieves the Hilt-injected ViewModel for this composable.
+ * - **rememberLauncherForActivityResult()**: Creates a launcher for starting Activities
+ *   and receiving their results (the Compose equivalent of onActivityResult).
+ * - **LaunchedEffect(uploadStatus)**: Runs a side-effect whenever the upload status changes.
+ *   Used to detect NeedsConsent and launch the consent Intent automatically.
+ * - **LocalContext.current**: Accesses the current Activity context from within a composable.
+ *   Needed for GoogleSignIn.getClient() which requires an Activity context.
+ *
+ * @see ui.screen.home.HomeViewModel for the state management
+ * @see ui.component.StatusCard for the upload status display
+ * @see ui.component.CountdownTimer for the countdown display
+ */
 package com.johnsonyuen.signalbackup.ui.screen.home
 
 import android.app.Activity
@@ -42,15 +79,27 @@ import com.google.api.services.drive.DriveScopes
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
 import com.johnsonyuen.signalbackup.ui.component.CountdownTimer
 import com.johnsonyuen.signalbackup.ui.component.StatusCard
+import com.johnsonyuen.signalbackup.ui.component.UploadProgressCard
 
 private const val TAG = "HomeScreen"
 
+/**
+ * The Home screen composable -- the app's primary interface.
+ *
+ * @param onNavigateToSettings Callback to programmatically switch to the Settings tab.
+ *        Called when the user taps the folder info chips.
+ * @param viewModel The Hilt-injected ViewModel providing state and actions.
+ */
 @Composable
 fun HomeScreen(
     onNavigateToSettings: () -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel()
 ) {
+    // Collect all ViewModel state flows as Compose State.
+    // collectAsStateWithLifecycle() automatically pauses collection when the
+    // screen is in the background, preventing unnecessary work.
     val uploadStatus by viewModel.uploadStatus.collectAsStateWithLifecycle()
+    val uploadProgress by viewModel.uploadProgress.collectAsStateWithLifecycle()
     val googleEmail by viewModel.googleAccountEmail.collectAsStateWithLifecycle()
     val scheduleHour by viewModel.scheduleHour.collectAsStateWithLifecycle()
     val scheduleMinute by viewModel.scheduleMinute.collectAsStateWithLifecycle()
@@ -59,6 +108,16 @@ fun HomeScreen(
     val context = LocalContext.current
     var signInError by remember { mutableStateOf<String?>(null) }
 
+    // -----------------------------------------------------------------------
+    // Activity result launchers for Google Sign-In and Drive consent.
+    // These are the Compose equivalents of the old onActivityResult() pattern.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Launcher for the Drive OAuth consent dialog.
+     * If the user grants consent (RESULT_OK), retry the upload.
+     * If denied, set the upload status to Failed.
+     */
     val consentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -71,12 +130,22 @@ fun HomeScreen(
         }
     }
 
+    /**
+     * Side-effect that watches the upload status. When it becomes NeedsConsent,
+     * automatically launch the consent Intent provided by the use case.
+     * This is a "fire-and-forget" effect -- it runs once per status change.
+     */
     LaunchedEffect(uploadStatus) {
         if (uploadStatus is UploadStatus.NeedsConsent) {
             consentLauncher.launch((uploadStatus as UploadStatus.NeedsConsent).consentIntent)
         }
     }
 
+    /**
+     * Launcher for the Google Sign-In flow.
+     * On success, extracts the email and saves it to DataStore.
+     * On failure, shows an error message on screen.
+     */
     val signInLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -97,26 +166,53 @@ fun HomeScreen(
         }
     }
 
+    /**
+     * Builds GoogleSignInOptions and launches the sign-in Intent.
+     *
+     * GoogleSignInOptions.DEFAULT_SIGN_IN provides basic profile info.
+     * requestEmail() adds the email scope.
+     * requestScopes(DRIVE) requests full Drive access so the app can both
+     * upload files AND list/browse existing user folders in the folder picker.
+     * The narrower DRIVE_FILE scope only sees app-created files/folders.
+     *
+     * Note: GoogleSignIn is deprecated but still functional. The newer
+     * Credential Manager API does not yet support Drive scopes directly.
+     */
     fun requestSignIn() {
         signInError = null
         val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
             .requestEmail()
-            .requestScopes(Scope(DriveScopes.DRIVE_FILE))
+            .requestScopes(Scope(DriveScopes.DRIVE))
             .build()
         val client = GoogleSignIn.getClient(context, gso)
         signInLauncher.launch(client.signInIntent)
     }
 
+    // -----------------------------------------------------------------------
+    // UI Layout
+    // -----------------------------------------------------------------------
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        StatusCard(status = uploadStatus)
+        // Upload progress card -- shown when the upload is actively running and the
+        // worker has reported progress data. Before the first progress callback, the
+        // regular StatusCard with an indeterminate spinner is shown instead.
+        val currentProgress = uploadProgress
+        if (uploadStatus is UploadStatus.Uploading && currentProgress != null) {
+            UploadProgressCard(progress = currentProgress)
+        } else {
+            // Upload status card -- shows idle/uploading/success/failed/needs-consent.
+            StatusCard(status = uploadStatus)
+        }
 
+        // Countdown timer -- shows time remaining until next scheduled upload.
         CountdownTimer(scheduleHour = scheduleHour, scheduleMinute = scheduleMinute)
 
+        // Quick-info chips showing whether local and Drive folders are configured.
+        // Tapping either chip navigates to the Settings tab for setup.
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             AssistChip(
                 onClick = onNavigateToSettings,
@@ -146,8 +242,10 @@ fun HomeScreen(
             )
         }
 
+        // Push the sign-in/upload button to the bottom of the screen.
         Spacer(modifier = Modifier.weight(1f))
 
+        // Show sign-in error if the last sign-in attempt failed.
         if (signInError != null) {
             Text(
                 text = signInError!!,
@@ -157,6 +255,7 @@ fun HomeScreen(
             )
         }
 
+        // Two states: signed in (show email + upload button) vs. not signed in (show sign-in).
         if (googleEmail != null) {
             Text(
                 text = "Signed in as $googleEmail",
@@ -164,6 +263,7 @@ fun HomeScreen(
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             )
 
+            // "Upload Now" button -- disabled while an upload is already in progress.
             Button(
                 onClick = { viewModel.uploadNow() },
                 modifier = Modifier.fillMaxWidth(),
@@ -178,6 +278,7 @@ fun HomeScreen(
                 Text("Upload Now")
             }
         } else {
+            // Google Sign-In button -- initiates the OAuth flow.
             Button(
                 onClick = { requestSignIn() },
                 modifier = Modifier.fillMaxWidth()

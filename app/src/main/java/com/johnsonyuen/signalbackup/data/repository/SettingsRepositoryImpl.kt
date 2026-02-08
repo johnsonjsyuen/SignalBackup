@@ -26,6 +26,7 @@
 package com.johnsonyuen.signalbackup.data.repository
 
 import com.johnsonyuen.signalbackup.data.local.datastore.SettingsDataStore
+import com.johnsonyuen.signalbackup.domain.model.ResumableUploadSession
 import kotlinx.coroutines.flow.Flow
 import javax.inject.Inject
 
@@ -102,5 +103,23 @@ class SettingsRepositoryImpl @Inject constructor(
 
     override suspend fun setThemeMode(mode: String) {
         settingsDataStore.setThemeMode(mode)
+    }
+
+    // ---- Resumable upload session delegation ----
+
+    override suspend fun getResumableSession(): ResumableUploadSession? {
+        return settingsDataStore.getResumableSession()
+    }
+
+    override suspend fun saveResumableSession(session: ResumableUploadSession) {
+        settingsDataStore.saveResumableSession(session)
+    }
+
+    override suspend fun updateResumableBytesUploaded(bytesUploaded: Long) {
+        settingsDataStore.updateResumableBytesUploaded(bytesUploaded)
+    }
+
+    override suspend fun clearResumableSession() {
+        settingsDataStore.clearResumableSession()
     }
 }

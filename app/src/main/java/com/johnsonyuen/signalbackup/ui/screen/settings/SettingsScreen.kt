@@ -1,3 +1,36 @@
+/**
+ * SettingsScreen.kt - The Settings screen for configuring app preferences.
+ *
+ * This screen provides the user interface for all app configuration:
+ * - **Local Backup Folder**: Uses Android's Storage Access Framework (SAF) to let the
+ *   user pick a directory where Signal stores its .backup files.
+ * - **Google Drive Folder**: Opens a custom DriveFolderPickerDialog for browsing and
+ *   selecting the Drive destination folder.
+ * - **Upload Schedule**: Opens a TimePickerDialog for choosing the daily backup time.
+ * - **Theme**: Opens a ThemeSelectionDialog with Light/Dark/System options.
+ * - **Account**: Shows the signed-in Google email with a sign-out button.
+ *
+ * Key Android/Compose concepts:
+ * - **ActivityResultContracts.OpenDocumentTree()**: Launches the system folder picker
+ *   (SAF). Returns a content URI that can be used to read files in that directory.
+ *   `takePersistableUriPermission` ensures the URI survives app restarts.
+ * - **Scaffold with SnackbarHost**: The Scaffold provides a slot for a SnackbarHost,
+ *   which displays error messages from Drive API calls (driveError state).
+ * - **LaunchedEffect(driveError)**: Watches the driveError state and shows a snackbar
+ *   whenever a new error occurs. After showing, clears the error in the ViewModel.
+ * - **rememberScrollState() + verticalScroll()**: Makes the settings list scrollable
+ *   if content exceeds the screen height.
+ * - **collectAsStateWithLifecycle()**: Lifecycle-aware Flow collection for all settings.
+ *
+ * Dialog management:
+ * Three boolean state variables (showTimePicker, showDrivePicker, showThemeDialog)
+ * control which dialog is currently visible. Only one dialog can be open at a time
+ * because the user must dismiss a dialog before interacting with the screen again.
+ *
+ * @see ui.screen.settings.SettingsViewModel for the state management
+ * @see ui.component.DriveFolderPickerDialog for the Drive folder browser
+ * @see ui.component.TimePickerDialog for the schedule time picker
+ */
 package com.johnsonyuen.signalbackup.ui.screen.settings
 
 import android.content.Intent
@@ -20,8 +53,16 @@ import com.johnsonyuen.signalbackup.ui.component.DriveFolderPickerDialog
 import com.johnsonyuen.signalbackup.ui.component.TimePickerDialog
 import com.johnsonyuen.signalbackup.util.formatScheduleTime
 
+/**
+ * The Settings screen composable.
+ *
+ * @param viewModel The Hilt-injected SettingsViewModel.
+ */
 @Composable
 fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
+    // -----------------------------------------------------------------------
+    // Collect all ViewModel state flows as lifecycle-aware Compose State.
+    // -----------------------------------------------------------------------
     val localFolderUri by viewModel.localFolderUri.collectAsStateWithLifecycle()
     val driveFolderName by viewModel.driveFolderName.collectAsStateWithLifecycle()
     val scheduleHour by viewModel.scheduleHour.collectAsStateWithLifecycle()
@@ -36,6 +77,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // Show Drive API errors as a snackbar, then clear the error.
     LaunchedEffect(driveError) {
         driveError?.let {
             snackbarHostState.showSnackbar(it)
@@ -43,14 +85,24 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Dialog visibility state -- local to this composable.
+    // -----------------------------------------------------------------------
     var showTimePicker by remember { mutableStateOf(false) }
     var showDrivePicker by remember { mutableStateOf(false) }
     var showThemeDialog by remember { mutableStateOf(false) }
 
+    // -----------------------------------------------------------------------
+    // SAF folder picker launcher.
+    // OpenDocumentTree launches the system "choose directory" UI.
+    // On result, we take a persistable URI permission so the app can access
+    // the folder across reboots without re-asking the user.
+    // -----------------------------------------------------------------------
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         uri?.let {
+            // Take a persistable read permission so the URI survives app restarts.
             context.contentResolver.takePersistableUriPermission(
                 it,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION
@@ -59,6 +111,9 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Screen layout: Scaffold with snackbar + scrollable Column of settings cards.
+    // -----------------------------------------------------------------------
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         containerColor = MaterialTheme.colorScheme.background
@@ -66,16 +121,17 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(scaffoldPadding)
-                .padding(16.dp),
+                .verticalScroll(rememberScrollState())  // Scrollable for small screens.
+                .padding(scaffoldPadding)                // Respect scaffold insets.
+                .padding(16.dp),                         // Content padding.
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            // --- Configuration section ---
             Text("Configuration", style = MaterialTheme.typography.titleLarge)
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Local folder
+            // Local backup folder card -- shows status and "Select" button.
             Card(modifier = Modifier.fillMaxWidth()) {
                 ListItem(
                     headlineContent = { Text("Local Backup Folder") },
@@ -89,7 +145,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                 )
             }
 
-            // Drive folder
+            // Google Drive folder card -- "Select" button disabled until signed in.
             Card(modifier = Modifier.fillMaxWidth()) {
                 ListItem(
                     headlineContent = { Text("Google Drive Folder") },
@@ -98,10 +154,10 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                     trailingContent = {
                         TextButton(
                             onClick = {
-                                viewModel.loadDriveFolders()
+                                viewModel.loadDriveFolders()  // Load root-level folders.
                                 showDrivePicker = true
                             },
-                            enabled = googleEmail != null
+                            enabled = googleEmail != null  // Must be signed in first.
                         ) {
                             Text("Select")
                         }
@@ -109,7 +165,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                 )
             }
 
-            // Schedule time
+            // Upload schedule card -- shows formatted time and "Change" button.
             Card(modifier = Modifier.fillMaxWidth()) {
                 ListItem(
                     headlineContent = { Text("Upload Schedule") },
@@ -127,14 +183,16 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Appearance section
+            // --- Appearance section ---
             Text("Appearance", style = MaterialTheme.typography.titleLarge)
 
+            // Theme card -- shows current mode with a contextual icon.
             Card(modifier = Modifier.fillMaxWidth()) {
                 ListItem(
                     headlineContent = { Text("Theme") },
                     supportingContent = { Text(themeMode.displayName) },
                     leadingContent = {
+                        // Show a different icon for each theme mode.
                         Icon(
                             when (themeMode) {
                                 ThemeMode.LIGHT -> Icons.Default.LightMode
@@ -154,9 +212,10 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Account info
+            // --- Account section ---
             Text("Account", style = MaterialTheme.typography.titleLarge)
 
+            // Account info card -- shows email or "Not signed in", with sign-out button.
             Card(modifier = Modifier.fillMaxWidth()) {
                 ListItem(
                     headlineContent = { Text(googleEmail ?: "Not signed in") },
@@ -173,6 +232,11 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Dialogs -- rendered conditionally based on boolean state flags.
+    // -----------------------------------------------------------------------
+
+    // Time picker dialog for changing the upload schedule.
     if (showTimePicker) {
         TimePickerDialog(
             initialHour = scheduleHour,
@@ -185,6 +249,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         )
     }
 
+    // Drive folder picker dialog for browsing and selecting a Drive folder.
     if (showDrivePicker) {
         DriveFolderPickerDialog(
             folders = driveFolders,
@@ -202,6 +267,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         )
     }
 
+    // Theme selection dialog with radio buttons for Light/Dark/System.
     if (showThemeDialog) {
         ThemeSelectionDialog(
             currentMode = themeMode,
@@ -214,6 +280,16 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
     }
 }
 
+/**
+ * A dialog with radio buttons for choosing the app's theme mode.
+ *
+ * Iterates over all [ThemeMode.entries] and renders a RadioButton + label for each.
+ * Selecting a mode immediately calls [onSelectMode] and closes the dialog.
+ *
+ * @param currentMode The currently active theme mode (determines which radio is selected).
+ * @param onSelectMode Callback when a mode is selected.
+ * @param onDismiss Callback when the dialog is dismissed (Cancel button or back press).
+ */
 @Composable
 private fun ThemeSelectionDialog(
     currentMode: ThemeMode,
@@ -225,6 +301,7 @@ private fun ThemeSelectionDialog(
         title = { Text("Choose theme") },
         text = {
             Column {
+                // Render one radio button row for each ThemeMode enum entry.
                 ThemeMode.entries.forEach { mode ->
                     Row(
                         modifier = Modifier

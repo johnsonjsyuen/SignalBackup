@@ -26,6 +26,7 @@
  */
 package com.johnsonyuen.signalbackup.data.repository
 
+import com.johnsonyuen.signalbackup.domain.model.ResumableUploadSession
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -87,4 +88,18 @@ interface SettingsRepository {
 
     /** Sets the theme mode preference. */
     suspend fun setThemeMode(mode: String)
+
+    // ---- Resumable upload session ----
+
+    /** Reads the saved resumable upload session, or null if none exists. */
+    suspend fun getResumableSession(): ResumableUploadSession?
+
+    /** Atomically saves all fields of a resumable upload session. */
+    suspend fun saveResumableSession(session: ResumableUploadSession)
+
+    /** Updates only the bytes-uploaded count in a saved session. */
+    suspend fun updateResumableBytesUploaded(bytesUploaded: Long)
+
+    /** Atomically clears all resumable session fields. */
+    suspend fun clearResumableSession()
 }

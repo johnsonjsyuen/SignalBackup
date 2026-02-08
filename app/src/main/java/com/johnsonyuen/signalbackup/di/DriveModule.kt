@@ -46,9 +46,11 @@ object DriveModule {
     /**
      * Provides the OAuth2 credential for Google Drive API authentication.
      *
-     * Configured with [DriveScopes.DRIVE_FILE] which grants the app permission to
-     * create and manage files it creates on Drive (but not access other files).
-     * This is the most restrictive scope that still allows file uploads.
+     * Configured with [DriveScopes.DRIVE] which grants the app full read/write access
+     * to the user's Google Drive. This broader scope is required so the folder picker
+     * can list ALL existing folders in the user's Drive -- not just folders created by
+     * this app. The narrower DRIVE_FILE scope only allows access to files/folders the
+     * app itself created, which causes the folder picker to show an empty list.
      *
      * The credential's `selectedAccountName` is set dynamically by GoogleDriveService
      * before each API call -- it is NOT set here during construction.
@@ -58,7 +60,7 @@ object DriveModule {
     fun provideGoogleAccountCredential(@ApplicationContext context: Context): GoogleAccountCredential =
         GoogleAccountCredential.usingOAuth2(
             context,
-            listOf(DriveScopes.DRIVE_FILE)
+            listOf(DriveScopes.DRIVE)
         )
 
     /**

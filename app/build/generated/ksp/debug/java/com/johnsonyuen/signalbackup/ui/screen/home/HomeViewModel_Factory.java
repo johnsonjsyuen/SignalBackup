@@ -1,8 +1,9 @@
 package com.johnsonyuen.signalbackup.ui.screen.home;
 
 import android.content.Context;
+import androidx.work.WorkManager;
 import com.johnsonyuen.signalbackup.data.repository.SettingsRepository;
-import com.johnsonyuen.signalbackup.domain.usecase.PerformUploadUseCase;
+import com.johnsonyuen.signalbackup.domain.usecase.ManualUploadUseCase;
 import dagger.internal.DaggerGenerated;
 import dagger.internal.Factory;
 import dagger.internal.QualifierMetadata;
@@ -27,34 +28,37 @@ import javax.inject.Provider;
     "nullness:initialization.field.uninitialized"
 })
 public final class HomeViewModel_Factory implements Factory<HomeViewModel> {
-  private final Provider<PerformUploadUseCase> performUploadUseCaseProvider;
+  private final Provider<ManualUploadUseCase> manualUploadUseCaseProvider;
 
   private final Provider<SettingsRepository> settingsRepositoryProvider;
 
+  private final Provider<WorkManager> workManagerProvider;
+
   private final Provider<Context> appContextProvider;
 
-  public HomeViewModel_Factory(Provider<PerformUploadUseCase> performUploadUseCaseProvider,
+  public HomeViewModel_Factory(Provider<ManualUploadUseCase> manualUploadUseCaseProvider,
       Provider<SettingsRepository> settingsRepositoryProvider,
-      Provider<Context> appContextProvider) {
-    this.performUploadUseCaseProvider = performUploadUseCaseProvider;
+      Provider<WorkManager> workManagerProvider, Provider<Context> appContextProvider) {
+    this.manualUploadUseCaseProvider = manualUploadUseCaseProvider;
     this.settingsRepositoryProvider = settingsRepositoryProvider;
+    this.workManagerProvider = workManagerProvider;
     this.appContextProvider = appContextProvider;
   }
 
   @Override
   public HomeViewModel get() {
-    return newInstance(performUploadUseCaseProvider.get(), settingsRepositoryProvider.get(), appContextProvider.get());
+    return newInstance(manualUploadUseCaseProvider.get(), settingsRepositoryProvider.get(), workManagerProvider.get(), appContextProvider.get());
   }
 
   public static HomeViewModel_Factory create(
-      Provider<PerformUploadUseCase> performUploadUseCaseProvider,
+      Provider<ManualUploadUseCase> manualUploadUseCaseProvider,
       Provider<SettingsRepository> settingsRepositoryProvider,
-      Provider<Context> appContextProvider) {
-    return new HomeViewModel_Factory(performUploadUseCaseProvider, settingsRepositoryProvider, appContextProvider);
+      Provider<WorkManager> workManagerProvider, Provider<Context> appContextProvider) {
+    return new HomeViewModel_Factory(manualUploadUseCaseProvider, settingsRepositoryProvider, workManagerProvider, appContextProvider);
   }
 
-  public static HomeViewModel newInstance(PerformUploadUseCase performUploadUseCase,
-      SettingsRepository settingsRepository, Context appContext) {
-    return new HomeViewModel(performUploadUseCase, settingsRepository, appContext);
+  public static HomeViewModel newInstance(ManualUploadUseCase manualUploadUseCase,
+      SettingsRepository settingsRepository, WorkManager workManager, Context appContext) {
+    return new HomeViewModel(manualUploadUseCase, settingsRepository, workManager, appContext);
   }
 }
