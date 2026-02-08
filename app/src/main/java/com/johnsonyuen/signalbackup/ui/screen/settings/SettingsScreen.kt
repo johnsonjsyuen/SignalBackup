@@ -48,6 +48,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.johnsonyuen.signalbackup.BuildConfig
 import com.johnsonyuen.signalbackup.domain.model.ThemeMode
 import com.johnsonyuen.signalbackup.ui.component.DriveFolderPickerDialog
 import com.johnsonyuen.signalbackup.ui.component.TimePickerDialog
@@ -227,6 +228,19 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                             }
                         }
                     }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // --- About section ---
+            Text("About", style = MaterialTheme.typography.titleLarge)
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                ListItem(
+                    headlineContent = { Text("Build Time") },
+                    supportingContent = { Text(BuildConfig.BUILD_TIME) },
+                    leadingContent = { Icon(Icons.Default.Info, contentDescription = null) },
                 )
             }
         }

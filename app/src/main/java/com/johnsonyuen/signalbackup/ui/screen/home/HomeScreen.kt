@@ -51,11 +51,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -276,6 +278,22 @@ fun HomeScreen(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Upload Now")
+            }
+
+            // "Cancel Upload" button -- only visible while an upload is in progress.
+            if (uploadStatus is UploadStatus.Uploading) {
+                OutlinedButton(
+                    onClick = { viewModel.cancelUpload() },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Cancel Upload")
+                }
             }
         } else {
             // Google Sign-In button -- initiates the OAuth flow.

@@ -26,6 +26,10 @@
  * @see build.gradle.kts (root) for plugin declarations
  * @see gradle/libs.versions.toml for version catalog
  */
+import java.time.ZonedDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+
 plugins {
     // Android application plugin -- builds the APK/AAB.
     alias(libs.plugins.android.application)
@@ -57,6 +61,10 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+
+        val buildTime = ZonedDateTime.now(ZoneId.of("Australia/Sydney"))
+            .format(DateTimeFormatter.ofPattern("yyyy-MM-dd hh:mm a z"))
+        buildConfigField("String", "BUILD_TIME", "\"$buildTime\"")
     }
 
     // Release signing configuration.
@@ -106,6 +114,8 @@ android {
     buildFeatures {
         // Enables Jetpack Compose in this module.
         compose = true
+        // Enables BuildConfig class generation (for BUILD_TIME field).
+        buildConfig = true
     }
 
     packaging {

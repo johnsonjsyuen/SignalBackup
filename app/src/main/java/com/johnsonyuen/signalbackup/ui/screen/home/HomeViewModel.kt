@@ -48,7 +48,6 @@ package com.johnsonyuen.signalbackup.ui.screen.home
 import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.asFlow
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
@@ -94,14 +93,11 @@ class HomeViewModel @Inject constructor(
     val uploadStatus: StateFlow<UploadStatus> = _uploadStatus.asStateFlow()
 
     // -----------------------------------------------------------------------
-    // Upload progress -- extracted from WorkInfo.progress during active uploads.
+    // Upload progress -- collected directly from UploadWorker's static flow.
     // -----------------------------------------------------------------------
 
-    /** Mutable backing field for upload progress. Null when no upload is active. */
-    private val _uploadProgress = MutableStateFlow<UploadProgress?>(null)
-
-    /** Public read-only upload progress observed by the Home screen UI. */
-    val uploadProgress: StateFlow<UploadProgress?> = _uploadProgress.asStateFlow()
+    /** Upload progress observed by the Home screen UI. */
+    val uploadProgress: StateFlow<UploadProgress?> = UploadWorker.progressFlow
 
     init {
         // Observe the manual upload work status and map it to our UploadStatus.
@@ -151,7 +147,6 @@ class HomeViewModel @Inject constructor(
      */
     fun uploadNow() {
         _uploadStatus.value = UploadStatus.Uploading
-        _uploadProgress.value = null
         manualUploadUseCase()
         Log.d(TAG, "Manual upload work enqueued via ManualUploadUseCase")
     }
@@ -173,8 +168,7 @@ class HomeViewModel @Inject constructor(
      */
     private fun observeManualUploadWork() {
         viewModelScope.launch {
-            workManager.getWorkInfosForUniqueWorkLiveData(ManualUploadUseCase.WORK_NAME)
-                .asFlow()
+            workManager.getWorkInfosForUniqueWorkFlow(ManualUploadUseCase.WORK_NAME)
                 .collect { workInfos ->
                     // getWorkInfosForUniqueWork returns a list, but we only ever have one
                     // work request for this unique name (KEEP policy). Take the first.
@@ -201,17 +195,21 @@ class HomeViewModel @Inject constructor(
                     }
 
                     _uploadStatus.value = newStatus
-
-                    // Extract progress data when the worker is actively running.
-                    // WorkInfo.progress contains the Data set by UploadWorker.setProgressAsync().
-                    if (workInfo.state == WorkInfo.State.RUNNING) {
-                        _uploadProgress.value = UploadProgress.fromWorkData(workInfo.progress)
-                    } else {
-                        // Clear progress when the upload is not actively running.
-                        _uploadProgress.value = null
-                    }
                 }
         }
+    }
+
+    /**
+     * Cancels the currently running manual upload.
+     *
+     * Cancels the WorkManager work by unique name, then immediately resets the UI state
+     * to Idle. WorkManager will also emit a CANCELLED WorkInfo, but we set Idle here for
+     * instant UI feedback rather than waiting for the WorkInfo observer to fire.
+     */
+    fun cancelUpload() {
+        workManager.cancelUniqueWork(ManualUploadUseCase.WORK_NAME)
+        _uploadStatus.value = UploadStatus.Idle
+        Log.d(TAG, "Manual upload cancelled by user")
     }
 
     /**

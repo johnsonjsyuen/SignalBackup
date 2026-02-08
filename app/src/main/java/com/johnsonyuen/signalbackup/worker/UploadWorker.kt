@@ -74,6 +74,9 @@ import com.johnsonyuen.signalbackup.domain.usecase.PerformUploadUseCase
 import com.johnsonyuen.signalbackup.util.formatFileSize
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Background worker that uploads the latest Signal backup to Google Drive.
@@ -151,6 +154,7 @@ class UploadWorker @AssistedInject constructor(
 
         // Record the upload start time for speed calculation in the progress listener.
         uploadStartTimeMs = System.currentTimeMillis()
+        _progressFlow.value = null
 
         try {
             // Delegate to the use case with a progress listener that reports to WorkManager.
@@ -174,6 +178,7 @@ class UploadWorker @AssistedInject constructor(
                 else -> Result.failure()
             }
         } finally {
+            _progressFlow.value = null
             // Always release both locks, even if the upload throws an exception.
             releaseWifiLock(wifiLock)
             releaseWakeLock(wakeLock)
@@ -212,13 +217,8 @@ class UploadWorker @AssistedInject constructor(
             estimatedSecondsRemaining = estimatedSecondsRemaining,
         )
 
-        // Publish progress to WorkManager so the ViewModel can observe it.
-        // setProgress is a synchronous method on CoroutineWorker (unlike setForeground).
-        try {
-            setProgressAsync(progress.toWorkData())
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to set progress data: ${e.message}")
-        }
+        // Publish progress directly via the static flow for instant UI updates.
+        _progressFlow.value = progress
 
         // Update the foreground notification with progress details.
         if (foregroundPromoted) {
@@ -422,5 +422,9 @@ class UploadWorker @AssistedInject constructor(
 
         /** Output data key for the uploaded file size in bytes, set on successful upload. */
         const val KEY_OUTPUT_FILE_SIZE = "output_file_size"
+
+        private val _progressFlow = MutableStateFlow<UploadProgress?>(null)
+        /** In-process progress flow for the UI to collect directly. */
+        val progressFlow: StateFlow<UploadProgress?> = _progressFlow.asStateFlow()
     }
 }
