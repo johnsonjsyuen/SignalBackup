@@ -1,0 +1,21 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+/build
+/app/build
+/captures
+.externalNativeBuild
+.cxx
+*.apk
+*.ap_
+*.aab
+
+# Client secrets and credentials
+client_secret_*.json
+credentials.json
+*.keystore
+*.jks
+
+# Test files
+test.backup
