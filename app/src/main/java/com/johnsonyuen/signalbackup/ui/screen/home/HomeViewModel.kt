@@ -110,6 +110,7 @@ class HomeViewModel @Inject constructor(
         // Observe the manual upload work status and map it to our UploadStatus.
         // This survives Activity recreation and picks up in-progress uploads.
         observeManualUploadWork()
+        observeScheduledUploadWork()
 
         // Explicitly collect progress from the UploadWorker's static flow.
         // Using an explicit collect (instead of stateIn) so we can log each emission
@@ -217,6 +218,44 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
+     * Observes WorkManager's work status for scheduled uploads and maps it to UploadStatus.
+     *
+     * This mirrors [observeManualUploadWork] but tracks the scheduled upload work enqueued
+     * by UploadAlarmReceiver. This ensures the Home screen UI reflects the status of
+     * scheduled uploads (e.g., showing "Uploading" or "Success") just like manual ones.
+     */
+    private fun observeScheduledUploadWork() {
+        viewModelScope.launch {
+            workManager.getWorkInfosForUniqueWorkFlow(SCHEDULED_WORK_NAME)
+                .collect { workInfos ->
+                    val workInfo = workInfos.firstOrNull() ?: return@collect
+
+                    val newStatus = when (workInfo.state) {
+                        WorkInfo.State.ENQUEUED,
+                        WorkInfo.State.BLOCKED,
+                        WorkInfo.State.RUNNING -> UploadStatus.Uploading
+
+                        WorkInfo.State.SUCCEEDED -> UploadStatus.Success(
+                            fileName = workInfo.outputData.getString(UploadWorker.KEY_OUTPUT_FILE_NAME)
+                                ?: "Backup uploaded",
+                            fileSizeBytes = workInfo.outputData.getLong(UploadWorker.KEY_OUTPUT_FILE_SIZE, 0)
+                        )
+
+                        WorkInfo.State.FAILED -> UploadStatus.Failed(
+                            "Upload failed. Check history for details."
+                        )
+
+                        WorkInfo.State.CANCELLED -> UploadStatus.Failed(
+                            "Upload was cancelled"
+                        )
+                    }
+
+                    _uploadStatus.value = newStatus
+                }
+        }
+    }
+
+    /**
      * Cancels the currently running manual upload.
      *
      * Cancels the WorkManager work by unique name, then immediately resets the UI state
@@ -249,5 +288,6 @@ class HomeViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "HomeViewModel"
+        private const val SCHEDULED_WORK_NAME = "signal_backup_scheduled_upload"
     }
 }

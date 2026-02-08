@@ -27,7 +27,11 @@ package com.johnsonyuen.signalbackup
 import android.app.Application
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
+import com.johnsonyuen.signalbackup.domain.usecase.ScheduleUploadUseCase
 import dagger.hilt.android.HiltAndroidApp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
@@ -52,6 +56,26 @@ class SignalBackupApp : Application(), Configuration.Provider {
      */
     @Inject
     lateinit var workerFactory: HiltWorkerFactory
+
+    /**
+     * Use case for scheduling periodic backup uploads via WorkManager.
+     *
+     * Injected here so we can ensure the periodic upload schedule is always enqueued
+     * on app startup. Without this, the schedule would only be set when the user
+     * explicitly changes the schedule time in Settings, meaning it would be lost
+     * after a device reboot or app force-stop.
+     */
+    @Inject
+    lateinit var scheduleUploadUseCase: ScheduleUploadUseCase
+
+    override fun onCreate() {
+        super.onCreate()
+        // Ensure the upload alarm is registered on every app startup.
+        // Safe to call repeatedly — it replaces any existing alarm.
+        CoroutineScope(Dispatchers.Default).launch {
+            scheduleUploadUseCase()
+        }
+    }
 
     /**
      * Custom WorkManager configuration that uses the Hilt worker factory.
