@@ -10,7 +10,7 @@
  * - This is a **data layer** class -- it sits at the lowest level of the data layer,
  *   directly representing the database schema.
  * - The domain layer uses [UploadRecord] as its model; conversion from Entity to Record
- *   happens in [HistoryViewModel].
+ *   happens in [UploadHistoryRepositoryImpl] via the [toUploadRecord] mapper.
  * - The entity is accessed exclusively through [UploadHistoryDao], never directly.
  *
  * Room annotations used:

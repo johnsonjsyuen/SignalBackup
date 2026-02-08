@@ -41,7 +41,12 @@ typealias UploadProgressListener = (bytesUploaded: Long, totalBytes: Long) -> Un
 interface DriveRepository {
 
     /**
-     * Uploads a file to Google Drive.
+     * Uploads a file to Google Drive using the client library's built-in resumable upload.
+     *
+     * NOTE: This is a single-process upload method. For cross-process resumable uploads
+     * (surviving app kills), use [initiateResumableUpload] + [uploadChunk] instead.
+     * [PerformUploadUseCase] uses the manual protocol exclusively; this method is retained
+     * as a simpler alternative for potential future use.
      *
      * @param folderId The Drive folder ID to upload into.
      * @param fileName The name for the uploaded file.

@@ -31,7 +31,7 @@ class DriveRepositoryImpl @Inject constructor(
     private val driveService: GoogleDriveService,
 ) : DriveRepository {
 
-    /** Delegates file upload to [GoogleDriveService.uploadFile]. */
+    /** Delegates single-process file upload to [GoogleDriveService.uploadFile]. Currently unused. */
     override suspend fun uploadFile(
         folderId: String,
         fileName: String,

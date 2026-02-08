@@ -9,7 +9,7 @@
  *
  * Architecture context:
  * - Part of the **domain layer** (domain/model package).
- * - Produced by [UploadWorker] from Google Drive's MediaHttpUploader callbacks.
+ * - Produced by [UploadWorker] from [PerformUploadUseCase]'s manual chunked upload callbacks.
  * - Consumed by [HomeViewModel] to populate the UI's progress display.
  * - Serialized to/from WorkManager's [Data] via companion helper methods.
  *

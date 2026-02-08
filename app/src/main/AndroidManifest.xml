@@ -54,6 +54,19 @@
         android:theme="@style/Theme.SignalBackup">
 
         <!--
+          Declare the foreground service type for WorkManager's SystemForegroundService.
+          On Android 14+ (API 34+), any foreground service must declare its type in the manifest.
+          WorkManager's library manifest includes the service declaration but NOT the
+          foregroundServiceType attribute. Without this, setForeground() with
+          FOREGROUND_SERVICE_TYPE_DATA_SYNC throws MissingForegroundServiceTypeException.
+          tools:node="merge" merges our attribute into the existing library-declared service.
+        -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
+
+        <!--
           Disable the default WorkManager initializer.
           WorkManager normally auto-initializes via AndroidX Startup's InitializationProvider.
           We override this because we need Hilt-based initialization (HiltWorkerFactory)

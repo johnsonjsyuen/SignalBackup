@@ -2,7 +2,9 @@
  * GoogleDriveService.kt - Google Drive API wrapper for file and folder operations.
  *
  * This class encapsulates all direct interactions with the Google Drive REST API v3.
- * It provides three core operations: uploading files, listing folders, and creating folders.
+ * It provides folder operations (list and create), a high-level upload via the Google
+ * client library's MediaHttpUploader, and a low-level manual resumable upload protocol
+ * (initiate, upload chunk, query progress) for cross-process upload resumption.
  *
  * Architecture context:
  * - Part of the **data layer** (data/remote package) -- this is the "remote data source."
@@ -118,13 +120,19 @@ class GoogleDriveService @Inject constructor(
     }
 
     /**
-     * Uploads a file to Google Drive using resumable media upload.
+     * Uploads a file to Google Drive using the Google client library's resumable media upload.
+     *
+     * NOTE: This method handles resumable upload within a single process lifecycle only.
+     * For cross-process resumable uploads (surviving app kills), the manual resumable upload
+     * methods below ([initiateResumableUpload], [uploadChunk], [querySessionProgress]) are
+     * used instead. [PerformUploadUseCase] uses the manual protocol exclusively; this method
+     * is retained as a simpler alternative for potential future use with smaller files.
      *
      * Creates a new file in the specified Drive folder with the given content.
      * The upload uses the Google API client's resumable upload protocol, which splits
      * the file into chunks and uploads them sequentially. If a chunk fails due to a
      * transient network error, the client retries that chunk without re-uploading the
-     * entire file. This is critical for large Signal backup files (often 100MB+).
+     * entire file.
      *
      * Configuration:
      * - **Chunk size**: 5 MB. Smaller chunks mean more HTTP requests but better resilience

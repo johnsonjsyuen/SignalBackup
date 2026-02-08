@@ -25,8 +25,8 @@
  * - The worker uses WorkManager's setProgress(Data) to publish upload progress (bytes uploaded,
  *   total bytes, speed, ETA) so that the ViewModel can observe it via WorkInfo.progress.
  * - The foreground notification is also updated with the upload percentage on each chunk.
- * - Upload speed is computed as a rolling average over the last several progress callbacks
- *   to smooth out fluctuations from individual chunk transfers.
+ * - Upload speed is computed as a simple cumulative average (total bytes uploaded / elapsed time),
+ *   which naturally smooths out as the upload progresses.
  *
  * Foreground promotion strategy:
  * - For **manual uploads** (identified by KEY_IS_MANUAL_UPLOAD input data), foreground promotion
@@ -397,8 +397,10 @@ class UploadWorker @AssistedInject constructor(
         private const val MAX_RETRY_COUNT = 3
 
         /**
-         * Timeout for WiFi and Wake locks (30 minutes). Provides a generous window for large
-         * backup uploads while ensuring locks are released if the worker hangs.
+         * Timeout for the WakeLock (30 minutes). Provides a generous window for large
+         * backup uploads while ensuring the lock is released if the worker hangs.
+         * Note: The WiFi lock does not support a timeout and is released explicitly
+         * in the finally block of doWork().
          */
         private const val LOCK_TIMEOUT_MS = 30L * 60L * 1000L
 
