@@ -444,17 +444,17 @@ class GoogleDriveService @Inject constructor(
      * Sends a PUT request with an empty body and a Content-Range header of `bytes star/total`.
      * Google responds with:
      * - **308 Resume Incomplete**: The `Range` header shows bytes received.
-     * - **200 OK**: The upload was already completed.
+     * - **200/201 OK**: The upload was already completed; the response body contains the file ID.
      * - **404 Not Found**: The session URI has expired or is invalid.
      *
      * @param sessionUri The resumable session URI to query.
      * @param totalBytes The total file size in bytes.
-     * @return The number of bytes confirmed as received, or -1 if the session is expired/invalid.
+     * @return A [SessionProgressResult] indicating progress, completion (with file ID), or expiry.
      */
     suspend fun querySessionProgress(
         sessionUri: String,
         totalBytes: Long,
-    ): Long = withContext(Dispatchers.IO) {
+    ): SessionProgressResult = withContext(Dispatchers.IO) {
         ensureAccount()
 
         val content = ByteArrayContent("application/octet-stream", ByteArray(0))
@@ -472,30 +472,60 @@ class GoogleDriveService @Inject constructor(
         try {
             when (response.statusCode) {
                 200, 201 -> {
-                    // The upload was already completed. Return totalBytes to signal completion.
-                    Log.d(TAG, "Session query: upload already complete")
-                    totalBytes
+                    // The upload was already completed. Parse the file ID from the response body.
+                    val responseBody = response.parseAsString()
+                    val fileId = parseFileIdFromResponse(responseBody)
+                    Log.d(TAG, "Session query: upload already complete, file ID: $fileId")
+                    SessionProgressResult.AlreadyComplete(fileId)
                 }
                 308 -> {
                     val rangeHeader = response.headers.range
                     Log.d(TAG, "Session query Range header: '$rangeHeader'")
                     val confirmedBytes = parseConfirmedBytes(rangeHeader)
                     Log.d(TAG, "Session query: $confirmedBytes bytes confirmed")
-                    confirmedBytes
+                    SessionProgressResult.InProgress(confirmedBytes)
                 }
                 404 -> {
                     // Session URI expired or invalid.
                     Log.w(TAG, "Session URI expired or not found")
-                    -1L
+                    SessionProgressResult.Expired
                 }
                 else -> {
                     Log.w(TAG, "Unexpected status querying session: ${response.statusCode}")
-                    -1L
+                    SessionProgressResult.Expired
                 }
             }
         } finally {
             response.disconnect()
         }
+    }
+
+    /**
+     * Searches for a file by name within a specific Drive folder.
+     *
+     * Used as a deduplication check before starting a fresh upload — if a file with
+     * the same name already exists in the target folder, we skip uploading.
+     *
+     * @param folderId The Google Drive folder ID to search in.
+     * @param fileName The file name to search for.
+     * @return The Drive file ID if found, or null if no matching file exists.
+     */
+    suspend fun findFileByName(
+        folderId: String,
+        fileName: String,
+    ): String? = withContext(Dispatchers.IO) {
+        ensureAccount()
+
+        val escapedName = fileName.replace("\\", "\\\\").replace("'", "\\'")
+        val query = "name = '$escapedName' and '$folderId' in parents and trashed = false"
+        val result = drive.files().list()
+            .setQ(query)
+            .setSpaces("drive")
+            .setFields("files(id)")
+            .setPageSize(1)
+            .execute()
+
+        result.files?.firstOrNull()?.id
     }
 
     /**
@@ -538,6 +568,20 @@ class GoogleDriveService @Inject constructor(
         val fileMetadata = jsonParser.parse(com.google.api.services.drive.model.File::class.java)
         return fileMetadata.id
             ?: throw IllegalStateException("No file ID in upload completion response")
+    }
+
+    /**
+     * Result of querying the progress of a resumable upload session.
+     */
+    sealed interface SessionProgressResult {
+        /** The upload is still in progress. */
+        data class InProgress(val confirmedBytes: Long) : SessionProgressResult
+
+        /** The upload was already completed in a previous attempt. */
+        data class AlreadyComplete(val driveFileId: String) : SessionProgressResult
+
+        /** The session URI is expired or invalid. */
+        data object Expired : SessionProgressResult
     }
 
     /**

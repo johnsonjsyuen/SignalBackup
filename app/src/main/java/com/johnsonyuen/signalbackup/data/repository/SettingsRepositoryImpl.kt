@@ -119,6 +119,10 @@ class SettingsRepositoryImpl @Inject constructor(
         settingsDataStore.updateResumableBytesUploaded(bytesUploaded)
     }
 
+    override suspend fun updateResumableDriveFileId(driveFileId: String) {
+        settingsDataStore.updateResumableDriveFileId(driveFileId)
+    }
+
     override suspend fun clearResumableSession() {
         settingsDataStore.clearResumableSession()
     }

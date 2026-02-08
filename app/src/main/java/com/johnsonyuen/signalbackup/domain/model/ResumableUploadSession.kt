@@ -34,6 +34,8 @@ package com.johnsonyuen.signalbackup.domain.model
  * @property driveFolderId The Google Drive folder ID the file is being uploaded to.
  * @property createdAtMillis Epoch millis when the session was initiated. Used to detect
  *        sessions that are likely expired (Google keeps them for ~1 week).
+ * @property driveFileId The Google Drive file ID, set when the upload completed but the
+ *        session hasn't been cleared yet (crash recovery window). Null while upload is in progress.
  */
 data class ResumableUploadSession(
     val sessionUri: String,
@@ -43,6 +45,7 @@ data class ResumableUploadSession(
     val totalBytes: Long,
     val driveFolderId: String,
     val createdAtMillis: Long,
+    val driveFileId: String? = null,
 ) {
     companion object {
         /**

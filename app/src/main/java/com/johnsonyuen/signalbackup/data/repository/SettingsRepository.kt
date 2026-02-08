@@ -100,6 +100,9 @@ interface SettingsRepository {
     /** Updates only the bytes-uploaded count in a saved session. */
     suspend fun updateResumableBytesUploaded(bytesUploaded: Long)
 
+    /** Updates only the Drive file ID in a saved session (called before clearing). */
+    suspend fun updateResumableDriveFileId(driveFileId: String)
+
     /** Atomically clears all resumable session fields. */
     suspend fun clearResumableSession()
 }

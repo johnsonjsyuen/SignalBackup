@@ -125,6 +125,25 @@ class PerformUploadUseCase @Inject constructor(
             val fileName = latestBackup.name ?: "unknown.backup"
             val fileSize = latestBackup.length()
 
+            // Layer 3: Deduplication check — if a file with the same name already exists
+            // in the target Drive folder, skip the upload to avoid creating duplicates.
+            val existingFileId = driveRepository.findFileByName(driveFolderId, fileName)
+            if (existingFileId != null) {
+                Log.d(TAG, "File '$fileName' already exists in Drive folder (id=$existingFileId), skipping upload")
+                uploadHistoryRepository.insert(
+                    UploadHistoryEntity(
+                        timestamp = System.currentTimeMillis(),
+                        fileName = fileName,
+                        fileSizeBytes = fileSize,
+                        status = UploadHistoryEntity.STATUS_SUCCESS,
+                        errorMessage = null,
+                        driveFolderId = driveFolderId,
+                        driveFileId = existingFileId,
+                    )
+                )
+                return@withContext UploadStatus.Success(fileName = fileName, fileSizeBytes = fileSize)
+            }
+
             // Step 4: Initiate a new resumable upload session with Google Drive.
             val sessionUri = driveRepository.initiateResumableUpload(
                 folderId = driveFolderId,
@@ -156,7 +175,11 @@ class PerformUploadUseCase @Inject constructor(
                 progressListener = progressListener,
             )
 
-            // Step 6: Upload complete -- clear session and record success.
+            // Step 6: Upload complete -- persist file ID first, then clear session.
+            // Persisting the file ID before clearing shrinks the crash window:
+            // if we crash between these two calls, the session will have the file ID
+            // and Layer 2's early check in tryResumeUpload will recover it.
+            settingsRepository.updateResumableDriveFileId(driveFileId)
             settingsRepository.clearResumableSession()
 
             uploadHistoryRepository.insert(
@@ -218,6 +241,30 @@ class PerformUploadUseCase @Inject constructor(
         currentDriveFolderId: String,
         progressListener: UploadProgressListener?,
     ): ResumeAttemptResult {
+        // Layer 2: If the upload already completed but the session wasn't cleared (crash
+        // between uploadChunked returning and clearResumableSession), recover immediately.
+        if (session.driveFileId != null) {
+            Log.d(TAG, "Session has driveFileId=${session.driveFileId} — upload already completed, recovering")
+            settingsRepository.clearResumableSession()
+            uploadHistoryRepository.insert(
+                UploadHistoryEntity(
+                    timestamp = System.currentTimeMillis(),
+                    fileName = session.fileName,
+                    fileSizeBytes = session.totalBytes,
+                    status = UploadHistoryEntity.STATUS_SUCCESS,
+                    errorMessage = null,
+                    driveFolderId = session.driveFolderId,
+                    driveFileId = session.driveFileId,
+                )
+            )
+            return ResumeAttemptResult.Completed(
+                UploadStatus.Success(
+                    fileName = session.fileName,
+                    fileSizeBytes = session.totalBytes,
+                )
+            )
+        }
+
         // Check if the session is too old (Google keeps session URIs for ~1 week).
         if (session.isExpired()) {
             return ResumeAttemptResult.SessionInvalid("Session expired (older than 6 days)")
@@ -251,40 +298,41 @@ class PerformUploadUseCase @Inject constructor(
             )
         }
 
-        // Query Google Drive for the actual number of bytes received.
-        val confirmedBytes = driveRepository.querySessionProgress(
+        // Query Google Drive for the actual progress of this session.
+        val progressResult = driveRepository.querySessionProgress(
             sessionUri = session.sessionUri,
             totalBytes = session.totalBytes,
         )
 
-        if (confirmedBytes < 0) {
-            // Session URI is expired or invalid (404 from Google).
-            return ResumeAttemptResult.SessionInvalid("Server rejected session URI (likely expired)")
-        }
-
-        if (confirmedBytes >= session.totalBytes) {
-            // The upload was already completed in a previous attempt! Clear session.
-            Log.d(TAG, "Session query shows upload already complete")
-            settingsRepository.clearResumableSession()
-            // We do not have the Drive file ID from the query response, so we cannot
-            // record it in history. Record a success without the file ID.
-            uploadHistoryRepository.insert(
-                UploadHistoryEntity(
-                    timestamp = System.currentTimeMillis(),
-                    fileName = session.fileName,
-                    fileSizeBytes = session.totalBytes,
-                    status = UploadHistoryEntity.STATUS_SUCCESS,
-                    errorMessage = null,
-                    driveFolderId = session.driveFolderId,
-                    driveFileId = null,
+        val confirmedBytes = when (progressResult) {
+            is GoogleDriveService.SessionProgressResult.Expired -> {
+                return ResumeAttemptResult.SessionInvalid("Server rejected session URI (likely expired)")
+            }
+            is GoogleDriveService.SessionProgressResult.AlreadyComplete -> {
+                // The upload was already completed — we now have the file ID from the response.
+                Log.d(TAG, "Session query shows upload already complete, file ID: ${progressResult.driveFileId}")
+                settingsRepository.clearResumableSession()
+                uploadHistoryRepository.insert(
+                    UploadHistoryEntity(
+                        timestamp = System.currentTimeMillis(),
+                        fileName = session.fileName,
+                        fileSizeBytes = session.totalBytes,
+                        status = UploadHistoryEntity.STATUS_SUCCESS,
+                        errorMessage = null,
+                        driveFolderId = session.driveFolderId,
+                        driveFileId = progressResult.driveFileId,
+                    )
                 )
-            )
-            return ResumeAttemptResult.Completed(
-                UploadStatus.Success(
-                    fileName = session.fileName,
-                    fileSizeBytes = session.totalBytes,
+                return ResumeAttemptResult.Completed(
+                    UploadStatus.Success(
+                        fileName = session.fileName,
+                        fileSizeBytes = session.totalBytes,
+                    )
                 )
-            )
+            }
+            is GoogleDriveService.SessionProgressResult.InProgress -> {
+                progressResult.confirmedBytes
+            }
         }
 
         // Resume from the confirmed byte offset.
@@ -303,7 +351,8 @@ class PerformUploadUseCase @Inject constructor(
             progressListener = progressListener,
         )
 
-        // Upload complete -- clear session and record success.
+        // Upload complete -- persist file ID first, then clear session.
+        settingsRepository.updateResumableDriveFileId(driveFileId)
         settingsRepository.clearResumableSession()
 
         uploadHistoryRepository.insert(

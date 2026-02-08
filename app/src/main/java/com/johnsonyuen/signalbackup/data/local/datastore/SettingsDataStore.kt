@@ -105,6 +105,9 @@ class SettingsDataStore(
 
         /** Epoch millis when the resumable session was initiated. */
         val RESUME_CREATED_AT = longPreferencesKey("resume_created_at")
+
+        /** The Google Drive file ID, set when upload completed but session not yet cleared. */
+        val RESUME_DRIVE_FILE_ID = stringPreferencesKey("resume_drive_file_id")
     }
 
     // ---- Defaults ----
@@ -285,6 +288,7 @@ class SettingsDataStore(
             totalBytes = totalBytes,
             driveFolderId = driveFolderId,
             createdAtMillis = createdAt,
+            driveFileId = prefs[Keys.RESUME_DRIVE_FILE_ID],
         )
     }
 
@@ -305,6 +309,11 @@ class SettingsDataStore(
             prefs[Keys.RESUME_TOTAL_BYTES] = session.totalBytes
             prefs[Keys.RESUME_DRIVE_FOLDER_ID] = session.driveFolderId
             prefs[Keys.RESUME_CREATED_AT] = session.createdAtMillis
+            if (session.driveFileId != null) {
+                prefs[Keys.RESUME_DRIVE_FILE_ID] = session.driveFileId
+            } else {
+                prefs.remove(Keys.RESUME_DRIVE_FILE_ID)
+            }
         }
     }
 
@@ -323,6 +332,20 @@ class SettingsDataStore(
     }
 
     /**
+     * Updates only the Drive file ID in a saved session.
+     *
+     * Called immediately after the upload completes (before clearing the session)
+     * to shrink the crash window where the file ID could be lost.
+     *
+     * @param driveFileId The Google Drive file ID of the completed upload.
+     */
+    suspend fun updateResumableDriveFileId(driveFileId: String) {
+        dataStore.edit { prefs ->
+            prefs[Keys.RESUME_DRIVE_FILE_ID] = driveFileId
+        }
+    }
+
+    /**
      * Atomically clears all resumable session fields.
      *
      * Called when the upload completes successfully, fails permanently, or the
@@ -337,6 +360,7 @@ class SettingsDataStore(
             prefs.remove(Keys.RESUME_TOTAL_BYTES)
             prefs.remove(Keys.RESUME_DRIVE_FOLDER_ID)
             prefs.remove(Keys.RESUME_CREATED_AT)
+            prefs.remove(Keys.RESUME_DRIVE_FILE_ID)
         }
     }
 }

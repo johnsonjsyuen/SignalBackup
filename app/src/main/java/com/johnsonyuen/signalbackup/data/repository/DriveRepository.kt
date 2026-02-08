@@ -118,14 +118,26 @@ interface DriveRepository {
     ): GoogleDriveService.ChunkUploadResult
 
     /**
-     * Queries the server for how many bytes have been received in a resumable session.
+     * Queries the server for the progress of a resumable session.
      *
      * @param sessionUri The resumable session URI.
      * @param totalBytes The total file size in bytes.
-     * @return Bytes confirmed, or -1 if the session is expired/invalid.
+     * @return A [GoogleDriveService.SessionProgressResult] indicating progress, completion, or expiry.
      */
     suspend fun querySessionProgress(
         sessionUri: String,
         totalBytes: Long,
-    ): Long
+    ): GoogleDriveService.SessionProgressResult
+
+    /**
+     * Searches for a file by name within a specific Drive folder.
+     *
+     * @param folderId The Drive folder ID to search in.
+     * @param fileName The file name to search for.
+     * @return The Drive file ID if found, or null if no matching file exists.
+     */
+    suspend fun findFileByName(
+        folderId: String,
+        fileName: String,
+    ): String?
 }

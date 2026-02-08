@@ -77,7 +77,15 @@ class DriveRepositoryImpl @Inject constructor(
     override suspend fun querySessionProgress(
         sessionUri: String,
         totalBytes: Long,
-    ): Long {
+    ): GoogleDriveService.SessionProgressResult {
         return driveService.querySessionProgress(sessionUri, totalBytes)
+    }
+
+    /** Delegates file-by-name search to [GoogleDriveService.findFileByName]. */
+    override suspend fun findFileByName(
+        folderId: String,
+        fileName: String,
+    ): String? {
+        return driveService.findFileByName(folderId, fileName)
     }
 }
