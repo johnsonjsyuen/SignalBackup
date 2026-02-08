@@ -19,3 +19,9 @@ credentials.json
 
 # Test files
 test.backup
+
+# Claude Code
+.claude/
+
+# Kotlin
+.kotlin/
