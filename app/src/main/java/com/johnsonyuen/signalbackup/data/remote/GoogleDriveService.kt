@@ -527,7 +527,7 @@ class GoogleDriveService @Inject constructor(
         val result = drive.files().list()
             .setQ(query)
             .setSpaces("drive")
-            .setFields("files(id, size, md5Checksum)")
+            .setFields("files(id, size)")
             .setOrderBy("createdTime desc")
             .setPageSize(1)
             .execute()
@@ -536,22 +536,7 @@ class GoogleDriveService @Inject constructor(
         DriveFileInfo(
             id = file.id,
             sizeBytes = file.getSize()?.toLong(),
-            md5Checksum = file.md5Checksum,
         )
-    }
-
-    /**
-     * Fetches the MD5 checksum of a file on Google Drive.
-     *
-     * @param fileId The Google Drive file ID.
-     * @return The MD5 checksum hex string, or null if unavailable.
-     */
-    suspend fun getFileMd5(fileId: String): String? = withContext(Dispatchers.IO) {
-        ensureAccount()
-        val file = drive.files().get(fileId)
-            .setFields("md5Checksum")
-            .execute()
-        file.md5Checksum
     }
 
     /**
@@ -560,7 +545,6 @@ class GoogleDriveService @Inject constructor(
     data class DriveFileInfo(
         val id: String,
         val sizeBytes: Long?,
-        val md5Checksum: String?,
     )
 
     /**

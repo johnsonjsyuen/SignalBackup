@@ -141,11 +141,4 @@ interface DriveRepository {
         fileName: String,
     ): GoogleDriveService.DriveFileInfo?
 
-    /**
-     * Fetches the MD5 checksum of a file on Google Drive.
-     *
-     * @param fileId The Google Drive file ID.
-     * @return The MD5 checksum hex string, or null if unavailable.
-     */
-    suspend fun getFileMd5(fileId: String): String?
 }

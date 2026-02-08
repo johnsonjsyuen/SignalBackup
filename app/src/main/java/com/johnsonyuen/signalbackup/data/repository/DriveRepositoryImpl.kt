@@ -89,8 +89,4 @@ class DriveRepositoryImpl @Inject constructor(
         return driveService.findFileByName(folderId, fileName)
     }
 
-    /** Delegates file MD5 fetch to [GoogleDriveService.getFileMd5]. */
-    override suspend fun getFileMd5(fileId: String): String? {
-        return driveService.getFileMd5(fileId)
-    }
 }
