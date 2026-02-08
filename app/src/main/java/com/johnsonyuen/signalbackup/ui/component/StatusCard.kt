@@ -32,6 +32,7 @@ fun StatusCard(status: UploadStatus, modifier: Modifier = Modifier) {
                 is UploadStatus.Failed -> MaterialTheme.colorScheme.errorContainer
                 is UploadStatus.Uploading -> MaterialTheme.colorScheme.secondaryContainer
                 is UploadStatus.Idle -> MaterialTheme.colorScheme.surfaceVariant
+                is UploadStatus.NeedsConsent -> MaterialTheme.colorScheme.secondaryContainer
             }
         )
     ) {
@@ -79,6 +80,14 @@ fun StatusCard(status: UploadStatus, modifier: Modifier = Modifier) {
                         Text("Upload failed", style = MaterialTheme.typography.bodyLarge)
                         Text(status.error, style = MaterialTheme.typography.bodySmall)
                     }
+                }
+
+                is UploadStatus.NeedsConsent -> {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Text("Requesting Drive permission...", style = MaterialTheme.typography.bodyLarge)
                 }
             }
         }

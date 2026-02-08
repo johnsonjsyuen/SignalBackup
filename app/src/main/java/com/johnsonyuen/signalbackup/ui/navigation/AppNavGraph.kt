@@ -75,7 +75,13 @@ fun AppNavGraph() {
             startDestination = HomeRoute,
             modifier = Modifier.padding(innerPadding)
         ) {
-            composable<HomeRoute> { HomeScreen() }
+            composable<HomeRoute> { HomeScreen(onNavigateToSettings = {
+                navController.navigate(SettingsRoute) {
+                    popUpTo(navController.graph.startDestinationId) { saveState = true }
+                    launchSingleTop = true
+                    restoreState = true
+                }
+            }) }
             composable<HistoryRoute> { HistoryScreen() }
             composable<SettingsRoute> { SettingsScreen() }
         }

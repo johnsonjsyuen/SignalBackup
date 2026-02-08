@@ -7,6 +7,7 @@ import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
 import com.johnsonyuen.signalbackup.domain.usecase.PerformUploadUseCase
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -18,7 +19,8 @@ import javax.inject.Inject
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     private val performUploadUseCase: PerformUploadUseCase,
-    private val settingsRepository: SettingsRepository
+    private val settingsRepository: SettingsRepository,
+    @ApplicationContext private val appContext: Context
 ) : ViewModel() {
 
     private val _uploadStatus = MutableStateFlow<UploadStatus>(UploadStatus.Idle)
@@ -39,11 +41,15 @@ class HomeViewModel @Inject constructor(
     val driveFolderName: StateFlow<String?> = settingsRepository.driveFolderName
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
-    fun uploadNow(context: Context) {
+    fun uploadNow() {
         viewModelScope.launch {
             _uploadStatus.value = UploadStatus.Uploading
-            _uploadStatus.value = performUploadUseCase(context)
+            _uploadStatus.value = performUploadUseCase(appContext)
         }
+    }
+
+    fun setUploadFailed(message: String) {
+        _uploadStatus.value = UploadStatus.Failed(message)
     }
 
     fun setGoogleAccountEmail(email: String) {

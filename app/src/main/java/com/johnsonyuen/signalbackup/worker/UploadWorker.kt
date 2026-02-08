@@ -23,7 +23,11 @@ class UploadWorker @AssistedInject constructor(
 ) : CoroutineWorker(appContext, workerParams) {
 
     override suspend fun doWork(): Result {
-        setForeground(createForegroundInfo())
+        try {
+            setForeground(createForegroundInfo())
+        } catch (_: Exception) {
+            // ForegroundServiceStartNotAllowedException on Android 12+ when app is not in foreground
+        }
 
         return when (val status = performUploadUseCase(applicationContext)) {
             is UploadStatus.Success -> Result.success()

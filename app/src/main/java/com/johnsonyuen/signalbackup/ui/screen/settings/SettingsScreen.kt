@@ -151,9 +151,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                 viewModel.setDriveFolder(folder)
                 showDrivePicker = false
             },
-            onCreateFolder = { name ->
-                // This will be implemented to create and refresh
-            },
+            onCreateFolder = { name -> viewModel.createFolder(name) },
             onDismiss = { showDrivePicker = false },
             currentFolder = currentDriveFolder
         )

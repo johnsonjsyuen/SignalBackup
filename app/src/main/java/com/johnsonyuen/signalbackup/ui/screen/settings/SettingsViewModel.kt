@@ -91,6 +91,18 @@ class SettingsViewModel @Inject constructor(
         loadDriveFolders(folder.id)
     }
 
+    fun createFolder(name: String) {
+        viewModelScope.launch {
+            try {
+                val parentId = _folderStack.value.lastOrNull()?.id
+                driveRepository.createFolder(name, parentId)
+                loadDriveFolders(parentId)
+            } catch (_: Exception) {
+                // Folder creation failed silently — folders list unchanged
+            }
+        }
+    }
+
     fun navigateUp() {
         val stack = _folderStack.value
         if (stack.isNotEmpty()) {
