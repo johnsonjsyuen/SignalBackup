@@ -265,8 +265,9 @@ class HomeViewModel @Inject constructor(
      */
     fun cancelUpload() {
         workManager.cancelUniqueWork(ManualUploadUseCase.WORK_NAME)
+        workManager.cancelUniqueWork(UploadAlarmReceiver.WORK_NAME)
         _uploadStatus.value = UploadStatus.Idle
-        Log.d(TAG, "Manual upload cancelled by user")
+        Log.d(TAG, "Upload cancelled by user")
     }
 
     /**
