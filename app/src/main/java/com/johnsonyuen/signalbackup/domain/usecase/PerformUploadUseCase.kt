@@ -46,6 +46,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.InputStream
+import java.security.MessageDigest
 import javax.inject.Inject
 
 /**
@@ -125,11 +126,12 @@ class PerformUploadUseCase @Inject constructor(
             val fileName = latestBackup.name ?: "unknown.backup"
             val fileSize = latestBackup.length()
 
-            // Layer 3: Deduplication check — if a file with the same name already exists
-            // in the target Drive folder, skip the upload to avoid creating duplicates.
-            val existingFileId = driveRepository.findFileByName(driveFolderId, fileName)
-            if (existingFileId != null) {
-                Log.d(TAG, "File '$fileName' already exists in Drive folder (id=$existingFileId), skipping upload")
+            // Layer 3: Deduplication check — if a file with the same name AND size already
+            // exists in the target Drive folder, skip the upload to avoid creating duplicates.
+            // Name-only matching is insufficient because a different file could have the same name.
+            val existingFile = driveRepository.findFileByName(driveFolderId, fileName)
+            if (existingFile != null && existingFile.sizeBytes == fileSize) {
+                Log.d(TAG, "File '$fileName' (size=$fileSize) already exists in Drive folder (id=${existingFile.id}), skipping upload")
                 uploadHistoryRepository.insert(
                     UploadHistoryEntity(
                         timestamp = System.currentTimeMillis(),
@@ -138,7 +140,7 @@ class PerformUploadUseCase @Inject constructor(
                         status = UploadHistoryEntity.STATUS_SUCCESS,
                         errorMessage = null,
                         driveFolderId = driveFolderId,
-                        driveFileId = existingFileId,
+                        driveFileId = existingFile.id,
                     )
                 )
                 return@withContext UploadStatus.Success(fileName = fileName, fileSizeBytes = fileSize)
@@ -166,7 +168,7 @@ class PerformUploadUseCase @Inject constructor(
 
             // Step 5: Upload the file in chunks.
             // uploadChunked manages its own stream lifecycle (open, skip, retry on EOF).
-            val driveFileId = uploadChunked(
+            val uploadResult = uploadChunked(
                 context = context,
                 fileUri = latestBackup.uri,
                 sessionUri = sessionUri,
@@ -175,11 +177,14 @@ class PerformUploadUseCase @Inject constructor(
                 progressListener = progressListener,
             )
 
-            // Step 6: Upload complete -- persist file ID first, then clear session.
+            // Step 6: Verify upload integrity via MD5 checksum.
+            verifyChecksum(context, latestBackup.uri, uploadResult.md5Checksum)
+
+            // Step 7: Upload complete -- persist file ID first, then clear session.
             // Persisting the file ID before clearing shrinks the crash window:
             // if we crash between these two calls, the session will have the file ID
             // and Layer 2's early check in tryResumeUpload will recover it.
-            settingsRepository.updateResumableDriveFileId(driveFileId)
+            settingsRepository.updateResumableDriveFileId(uploadResult.driveFileId)
             settingsRepository.clearResumableSession()
 
             uploadHistoryRepository.insert(
@@ -190,7 +195,7 @@ class PerformUploadUseCase @Inject constructor(
                     status = UploadHistoryEntity.STATUS_SUCCESS,
                     errorMessage = null,
                     driveFolderId = driveFolderId,
-                    driveFileId = driveFileId,
+                    driveFileId = uploadResult.driveFileId,
                 )
             )
 
@@ -342,7 +347,7 @@ class PerformUploadUseCase @Inject constructor(
         settingsRepository.updateResumableBytesUploaded(confirmedBytes)
 
         // uploadChunked manages its own stream lifecycle (open, skip, retry on EOF).
-        val driveFileId = uploadChunked(
+        val uploadResult = uploadChunked(
             context = context,
             fileUri = localFileUri,
             sessionUri = session.sessionUri,
@@ -351,8 +356,11 @@ class PerformUploadUseCase @Inject constructor(
             progressListener = progressListener,
         )
 
+        // Verify upload integrity via MD5 checksum.
+        verifyChecksum(context, localFileUri, uploadResult.md5Checksum)
+
         // Upload complete -- persist file ID first, then clear session.
-        settingsRepository.updateResumableDriveFileId(driveFileId)
+        settingsRepository.updateResumableDriveFileId(uploadResult.driveFileId)
         settingsRepository.clearResumableSession()
 
         uploadHistoryRepository.insert(
@@ -363,7 +371,7 @@ class PerformUploadUseCase @Inject constructor(
                 status = UploadHistoryEntity.STATUS_SUCCESS,
                 errorMessage = null,
                 driveFolderId = session.driveFolderId,
-                driveFileId = driveFileId,
+                driveFileId = uploadResult.driveFileId,
             )
         )
 
@@ -394,6 +402,15 @@ class PerformUploadUseCase @Inject constructor(
      * @param progressListener Optional progress callback.
      * @return The Google Drive file ID of the completed upload.
      */
+    /**
+     * Result of a chunked upload, containing both the Drive file ID and the
+     * MD5 checksum returned by Google (if available).
+     */
+    private data class ChunkedUploadResult(
+        val driveFileId: String,
+        val md5Checksum: String?,
+    )
+
     private suspend fun uploadChunked(
         context: Context,
         fileUri: Uri,
@@ -401,7 +418,7 @@ class PerformUploadUseCase @Inject constructor(
         offset: Long,
         totalBytes: Long,
         progressListener: UploadProgressListener?,
-    ): String {
+    ): ChunkedUploadResult {
         var currentOffset = offset
         val buffer = ByteArray(CHUNK_SIZE)
         var noProgressCount = 0
@@ -489,7 +506,7 @@ class PerformUploadUseCase @Inject constructor(
                     is GoogleDriveService.ChunkUploadResult.Complete -> {
                         Log.d(TAG, "Chunk uploaded: COMPLETE offset=$totalBytes total=$totalBytes")
                         progressListener?.invoke(totalBytes, totalBytes)
-                        return result.driveFileId
+                        return ChunkedUploadResult(result.driveFileId, result.md5Checksum)
                     }
                 }
             }
@@ -502,6 +519,63 @@ class PerformUploadUseCase @Inject constructor(
         throw IllegalStateException(
             "All $totalBytes bytes uploaded but server did not confirm completion"
         )
+    }
+
+    /**
+     * Verifies that the uploaded file's MD5 checksum matches the local file.
+     *
+     * If the server-side checksum is available, computes the local file's MD5 and compares.
+     * A mismatch throws [IllegalStateException], which leaves the session saved for retry
+     * (the catch block in [invoke] preserves the session on exception).
+     *
+     * If the server did not return a checksum (null), the verification is skipped with a warning.
+     *
+     * @param context Android Context for ContentResolver access.
+     * @param fileUri SAF URI of the local file.
+     * @param remoteMd5 The MD5 checksum returned by Google Drive, or null.
+     */
+    private fun verifyChecksum(context: Context, fileUri: Uri, remoteMd5: String?) {
+        if (remoteMd5 == null) {
+            Log.w(TAG, "Server did not return MD5 checksum, skipping verification")
+            return
+        }
+        val localMd5 = computeLocalMd5(context, fileUri)
+        if (localMd5 == null) {
+            Log.w(TAG, "Could not compute local file MD5, skipping verification")
+            return
+        }
+        if (!localMd5.equals(remoteMd5, ignoreCase = true)) {
+            throw IllegalStateException(
+                "Checksum mismatch: local=$localMd5, remote=$remoteMd5. " +
+                    "The uploaded file may be corrupted."
+            )
+        }
+        Log.d(TAG, "Checksum verified: $localMd5")
+    }
+
+    /**
+     * Computes the MD5 checksum of a local file via SAF.
+     *
+     * @param context Android Context for ContentResolver access.
+     * @param fileUri SAF URI of the file.
+     * @return The MD5 hex string (lowercase), or null if the file cannot be read.
+     */
+    private fun computeLocalMd5(context: Context, fileUri: Uri): String? {
+        val stream = context.contentResolver.openInputStream(fileUri) ?: return null
+        return try {
+            val digest = MessageDigest.getInstance("MD5")
+            val buffer = ByteArray(8192)
+            var bytesRead: Int
+            while (stream.read(buffer).also { bytesRead = it } != -1) {
+                digest.update(buffer, 0, bytesRead)
+            }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to compute local MD5", e)
+            null
+        } finally {
+            stream.close()
+        }
     }
 
     /**

@@ -85,7 +85,12 @@ class DriveRepositoryImpl @Inject constructor(
     override suspend fun findFileByName(
         folderId: String,
         fileName: String,
-    ): String? {
+    ): GoogleDriveService.DriveFileInfo? {
         return driveService.findFileByName(folderId, fileName)
+    }
+
+    /** Delegates file MD5 fetch to [GoogleDriveService.getFileMd5]. */
+    override suspend fun getFileMd5(fileId: String): String? {
+        return driveService.getFileMd5(fileId)
     }
 }

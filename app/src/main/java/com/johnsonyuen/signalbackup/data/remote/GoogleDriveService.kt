@@ -336,8 +336,10 @@ class GoogleDriveService @Inject constructor(
         )
 
         // The initiation URL follows the Drive v3 upload endpoint format.
+        // Include fields=id,md5Checksum so the completion response includes the checksum.
         val initiationUrl = GenericUrl(DRIVE_UPLOAD_URL).apply {
             put("uploadType", "resumable")
+            put("fields", "id,md5Checksum")
         }
 
         // Build the POST request with the metadata as JSON body.
@@ -413,11 +415,12 @@ class GoogleDriveService @Inject constructor(
         try {
             when (response.statusCode) {
                 200, 201 -> {
-                    // Upload complete -- parse the file ID from the JSON response.
+                    // Upload complete -- parse the file ID and MD5 from the JSON response.
                     val responseBody = response.parseAsString()
                     val fileId = parseFileIdFromResponse(responseBody)
-                    Log.d(TAG, "Upload complete, file ID: $fileId")
-                    ChunkUploadResult.Complete(fileId)
+                    val md5 = parseMd5FromResponse(responseBody)
+                    Log.d(TAG, "Upload complete, file ID: $fileId, md5: $md5")
+                    ChunkUploadResult.Complete(fileId, md5)
                 }
                 308 -> {
                     // Resume Incomplete -- parse how many bytes Google has confirmed.
@@ -491,8 +494,10 @@ class GoogleDriveService @Inject constructor(
                     SessionProgressResult.Expired
                 }
                 else -> {
-                    Log.w(TAG, "Unexpected status querying session: ${response.statusCode}")
-                    SessionProgressResult.Expired
+                    // Throw on unexpected status (including 5xx) so the exception propagates
+                    // to PerformUploadUseCase's catch block, which preserves the session for retry.
+                    // Returning Expired here would permanently discard a valid session.
+                    throw HttpResponseException(response)
                 }
             }
         } finally {
@@ -505,15 +510,16 @@ class GoogleDriveService @Inject constructor(
      *
      * Used as a deduplication check before starting a fresh upload — if a file with
      * the same name already exists in the target folder, we skip uploading.
+     * Returns the file ID, size, and MD5 checksum for verification.
      *
      * @param folderId The Google Drive folder ID to search in.
      * @param fileName The file name to search for.
-     * @return The Drive file ID if found, or null if no matching file exists.
+     * @return A [DriveFileInfo] with the file's ID, size, and MD5, or null if not found.
      */
     suspend fun findFileByName(
         folderId: String,
         fileName: String,
-    ): String? = withContext(Dispatchers.IO) {
+    ): DriveFileInfo? = withContext(Dispatchers.IO) {
         ensureAccount()
 
         val escapedName = fileName.replace("\\", "\\\\").replace("'", "\\'")
@@ -521,12 +527,41 @@ class GoogleDriveService @Inject constructor(
         val result = drive.files().list()
             .setQ(query)
             .setSpaces("drive")
-            .setFields("files(id)")
+            .setFields("files(id, size, md5Checksum)")
+            .setOrderBy("createdTime desc")
             .setPageSize(1)
             .execute()
 
-        result.files?.firstOrNull()?.id
+        val file = result.files?.firstOrNull() ?: return@withContext null
+        DriveFileInfo(
+            id = file.id,
+            sizeBytes = file.getSize()?.toLong(),
+            md5Checksum = file.md5Checksum,
+        )
     }
+
+    /**
+     * Fetches the MD5 checksum of a file on Google Drive.
+     *
+     * @param fileId The Google Drive file ID.
+     * @return The MD5 checksum hex string, or null if unavailable.
+     */
+    suspend fun getFileMd5(fileId: String): String? = withContext(Dispatchers.IO) {
+        ensureAccount()
+        val file = drive.files().get(fileId)
+            .setFields("md5Checksum")
+            .execute()
+        file.md5Checksum
+    }
+
+    /**
+     * Information about a file found on Google Drive.
+     */
+    data class DriveFileInfo(
+        val id: String,
+        val sizeBytes: Long?,
+        val md5Checksum: String?,
+    )
 
     /**
      * Parses the confirmed byte count from a Range header value.
@@ -566,8 +601,20 @@ class GoogleDriveService @Inject constructor(
         // Use GsonFactory to parse the response properly.
         val jsonParser = jsonFactory.createJsonParser(responseBody)
         val fileMetadata = jsonParser.parse(com.google.api.services.drive.model.File::class.java)
-        return fileMetadata.id
+        return fileMetadata.id?.takeIf { it.isNotEmpty() }
             ?: throw IllegalStateException("No file ID in upload completion response")
+    }
+
+    /**
+     * Extracts the MD5 checksum from a Google Drive JSON response body.
+     *
+     * @param responseBody The raw JSON response string.
+     * @return The MD5 checksum hex string, or null if not present.
+     */
+    private fun parseMd5FromResponse(responseBody: String): String? {
+        val jsonParser = jsonFactory.createJsonParser(responseBody)
+        val fileMetadata = jsonParser.parse(com.google.api.services.drive.model.File::class.java)
+        return fileMetadata.md5Checksum
     }
 
     /**
@@ -597,8 +644,9 @@ class GoogleDriveService @Inject constructor(
         /**
          * The upload is complete.
          * @property driveFileId The Google Drive file ID of the created file.
+         * @property md5Checksum The MD5 checksum of the file as computed by Google Drive, or null.
          */
-        data class Complete(val driveFileId: String) : ChunkUploadResult
+        data class Complete(val driveFileId: String, val md5Checksum: String? = null) : ChunkUploadResult
     }
 
     companion object {

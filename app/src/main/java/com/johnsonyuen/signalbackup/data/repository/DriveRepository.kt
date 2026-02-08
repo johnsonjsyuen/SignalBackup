@@ -134,10 +134,18 @@ interface DriveRepository {
      *
      * @param folderId The Drive folder ID to search in.
      * @param fileName The file name to search for.
-     * @return The Drive file ID if found, or null if no matching file exists.
+     * @return A [GoogleDriveService.DriveFileInfo] with the file's metadata, or null if not found.
      */
     suspend fun findFileByName(
         folderId: String,
         fileName: String,
-    ): String?
+    ): GoogleDriveService.DriveFileInfo?
+
+    /**
+     * Fetches the MD5 checksum of a file on Google Drive.
+     *
+     * @param fileId The Google Drive file ID.
+     * @return The MD5 checksum hex string, or null if unavailable.
+     */
+    suspend fun getFileMd5(fileId: String): String?
 }
