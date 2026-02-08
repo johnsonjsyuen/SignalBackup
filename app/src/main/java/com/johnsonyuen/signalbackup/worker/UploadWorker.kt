@@ -158,7 +158,13 @@ class UploadWorker @AssistedInject constructor(
             return when (val status = performUploadUseCase(applicationContext) { bytesUploaded, totalBytes ->
                 onUploadProgress(bytesUploaded, totalBytes)
             }) {
-                is UploadStatus.Success -> Result.success()
+                is UploadStatus.Success -> {
+                    val outputData = androidx.work.Data.Builder()
+                        .putString(KEY_OUTPUT_FILE_NAME, status.fileName)
+                        .putLong(KEY_OUTPUT_FILE_SIZE, status.fileSizeBytes)
+                        .build()
+                    Result.success(outputData)
+                }
                 is UploadStatus.Failed -> {
                     // Retry up to MAX_RETRY_COUNT times with exponential backoff.
                     if (runAttemptCount < MAX_RETRY_COUNT) Result.retry() else Result.failure()
@@ -410,5 +416,11 @@ class UploadWorker @AssistedInject constructor(
          * because without foreground status the upload will be killed on backgrounding.
          */
         const val KEY_IS_MANUAL_UPLOAD = "is_manual_upload"
+
+        /** Output data key for the uploaded file name, set on successful upload. */
+        const val KEY_OUTPUT_FILE_NAME = "output_file_name"
+
+        /** Output data key for the uploaded file size in bytes, set on successful upload. */
+        const val KEY_OUTPUT_FILE_SIZE = "output_file_size"
     }
 }

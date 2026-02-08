@@ -145,18 +145,15 @@ class PerformUploadUseCase @Inject constructor(
             settingsRepository.saveResumableSession(session)
 
             // Step 5: Upload the file in chunks.
-            val inputStream = context.contentResolver.openInputStream(latestBackup.uri)
-                ?: return@withContext UploadStatus.Failed("Cannot open backup file")
-
-            val driveFileId = inputStream.use { stream ->
-                uploadChunked(
-                    sessionUri = sessionUri,
-                    inputStream = stream,
-                    offset = 0L,
-                    totalBytes = fileSize,
-                    progressListener = progressListener,
-                )
-            }
+            // uploadChunked manages its own stream lifecycle (open, skip, retry on EOF).
+            val driveFileId = uploadChunked(
+                context = context,
+                fileUri = latestBackup.uri,
+                sessionUri = sessionUri,
+                offset = 0L,
+                totalBytes = fileSize,
+                progressListener = progressListener,
+            )
 
             // Step 6: Upload complete -- clear session and record success.
             settingsRepository.clearResumableSession()
@@ -295,22 +292,15 @@ class PerformUploadUseCase @Inject constructor(
         // Update the saved session with the server-confirmed byte count.
         settingsRepository.updateResumableBytesUploaded(confirmedBytes)
 
-        // Open the file and skip to the resume offset.
-        val inputStream = context.contentResolver.openInputStream(localFileUri)
-            ?: return ResumeAttemptResult.SessionInvalid("Cannot open backup file for resume")
-
-        val driveFileId = inputStream.use { stream ->
-            // Skip past the bytes that are already uploaded.
-            skipBytes(stream, confirmedBytes)
-
-            uploadChunked(
-                sessionUri = session.sessionUri,
-                inputStream = stream,
-                offset = confirmedBytes,
-                totalBytes = session.totalBytes,
-                progressListener = progressListener,
-            )
-        }
+        // uploadChunked manages its own stream lifecycle (open, skip, retry on EOF).
+        val driveFileId = uploadChunked(
+            context = context,
+            fileUri = localFileUri,
+            sessionUri = session.sessionUri,
+            offset = confirmedBytes,
+            totalBytes = session.totalBytes,
+            progressListener = progressListener,
+        )
 
         // Upload complete -- clear session and record success.
         settingsRepository.clearResumableSession()
@@ -338,20 +328,26 @@ class PerformUploadUseCase @Inject constructor(
     /**
      * Uploads a file to Google Drive in chunks via the resumable upload protocol.
      *
-     * Reads the InputStream in [CHUNK_SIZE]-byte blocks and uploads each one to the
-     * session URI. After each successful chunk, the confirmed byte count is persisted
-     * to DataStore so a future retry can resume from that point.
+     * Opens the file InputStream internally and manages its lifecycle. If the stream
+     * becomes invalidated (e.g., SAF InputStream closed when the app is backgrounded),
+     * the method re-opens the stream from the SAF URI and retries the failed read once.
      *
+     * Reads the file in [CHUNK_SIZE]-byte blocks and uploads each one to the session URI.
+     * After each successful chunk, the confirmed byte count is persisted to DataStore so
+     * a future retry can resume from that point.
+     *
+     * @param context Android Context for ContentResolver access.
+     * @param fileUri SAF URI of the file to upload.
      * @param sessionUri The resumable session URI.
-     * @param inputStream The file content stream, positioned at [offset].
-     * @param offset The byte offset to start uploading from.
+     * @param offset The byte offset to start uploading from (0 for fresh uploads).
      * @param totalBytes The total file size in bytes.
      * @param progressListener Optional progress callback.
      * @return The Google Drive file ID of the completed upload.
      */
     private suspend fun uploadChunked(
+        context: Context,
+        fileUri: Uri,
         sessionUri: String,
-        inputStream: InputStream,
         offset: Long,
         totalBytes: Long,
         progressListener: UploadProgressListener?,
@@ -359,47 +355,67 @@ class PerformUploadUseCase @Inject constructor(
         var currentOffset = offset
         val buffer = ByteArray(CHUNK_SIZE)
 
+        // Open the stream and skip to the starting offset if resuming.
+        var stream = openStreamAtOffset(context, fileUri, currentOffset)
+            ?: throw IllegalStateException("Cannot open backup file at $fileUri")
+
         // Report initial progress (important for resumed uploads so UI shows where we are).
         progressListener?.invoke(currentOffset, totalBytes)
 
-        while (currentOffset < totalBytes) {
-            // Read up to CHUNK_SIZE bytes from the stream.
-            val bytesToRead = minOf(CHUNK_SIZE.toLong(), totalBytes - currentOffset).toInt()
-            val bytesRead = readFully(inputStream, buffer, bytesToRead)
+        try {
+            while (currentOffset < totalBytes) {
+                // Read up to CHUNK_SIZE bytes from the stream.
+                val bytesToRead = minOf(CHUNK_SIZE.toLong(), totalBytes - currentOffset).toInt()
+                var bytesRead = readFully(stream, buffer, bytesToRead)
 
-            if (bytesRead <= 0) {
-                throw IllegalStateException(
-                    "Unexpected end of stream at offset $currentOffset (expected $totalBytes bytes)"
+                // If the stream returned EOF, the SAF InputStream may have been invalidated
+                // (e.g., app backgrounded). Re-open the stream at the current offset and retry.
+                if (bytesRead <= 0) {
+                    Log.w(TAG, "Stream EOF at offset $currentOffset, re-opening from SAF URI")
+                    stream.close()
+                    stream = openStreamAtOffset(context, fileUri, currentOffset)
+                        ?: throw IllegalStateException(
+                            "Cannot re-open backup file at $fileUri after stream failure"
+                        )
+                    bytesRead = readFully(stream, buffer, bytesToRead)
+                    if (bytesRead <= 0) {
+                        throw IllegalStateException(
+                            "Unexpected end of stream at offset $currentOffset " +
+                                "(expected $totalBytes bytes) even after re-opening"
+                        )
+                    }
+                }
+
+                // Upload this chunk. Use the exact bytes read (may be less than buffer size
+                // for the final chunk).
+                val chunkData = if (bytesRead < buffer.size) {
+                    buffer.copyOf(bytesRead)
+                } else {
+                    buffer
+                }
+
+                val result = driveRepository.uploadChunk(
+                    sessionUri = sessionUri,
+                    chunkData = chunkData,
+                    offset = currentOffset,
+                    totalBytes = totalBytes,
                 )
-            }
 
-            // Upload this chunk. Use the exact bytes read (may be less than buffer size
-            // for the final chunk).
-            val chunkData = if (bytesRead < buffer.size) {
-                buffer.copyOf(bytesRead)
-            } else {
-                buffer
-            }
-
-            val result = driveRepository.uploadChunk(
-                sessionUri = sessionUri,
-                chunkData = chunkData,
-                offset = currentOffset,
-                totalBytes = totalBytes,
-            )
-
-            when (result) {
-                is GoogleDriveService.ChunkUploadResult.InProgress -> {
-                    currentOffset = result.confirmedBytes
-                    // Persist the updated byte count so a retry can resume here.
-                    settingsRepository.updateResumableBytesUploaded(currentOffset)
-                    progressListener?.invoke(currentOffset, totalBytes)
-                }
-                is GoogleDriveService.ChunkUploadResult.Complete -> {
-                    progressListener?.invoke(totalBytes, totalBytes)
-                    return result.driveFileId
+                when (result) {
+                    is GoogleDriveService.ChunkUploadResult.InProgress -> {
+                        currentOffset = result.confirmedBytes
+                        // Persist the updated byte count so a retry can resume here.
+                        settingsRepository.updateResumableBytesUploaded(currentOffset)
+                        progressListener?.invoke(currentOffset, totalBytes)
+                    }
+                    is GoogleDriveService.ChunkUploadResult.Complete -> {
+                        progressListener?.invoke(totalBytes, totalBytes)
+                        return result.driveFileId
+                    }
                 }
             }
+        } finally {
+            stream.close()
         }
 
         // If we reach here, all bytes were uploaded but we did not get a 200 response.
@@ -407,6 +423,22 @@ class PerformUploadUseCase @Inject constructor(
         throw IllegalStateException(
             "All $totalBytes bytes uploaded but server did not confirm completion"
         )
+    }
+
+    /**
+     * Opens an InputStream for the given SAF URI and skips to the specified byte offset.
+     *
+     * @param context Android Context for ContentResolver access.
+     * @param fileUri SAF URI of the file to open.
+     * @param offset The byte offset to skip to (0 for the beginning).
+     * @return The positioned InputStream, or null if the file cannot be opened.
+     */
+    private fun openStreamAtOffset(context: Context, fileUri: Uri, offset: Long): InputStream? {
+        val stream = context.contentResolver.openInputStream(fileUri) ?: return null
+        if (offset > 0) {
+            skipBytes(stream, offset)
+        }
+        return stream
     }
 
     /**

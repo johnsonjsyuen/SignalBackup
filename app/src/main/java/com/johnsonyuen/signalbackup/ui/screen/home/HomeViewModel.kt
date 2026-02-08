@@ -56,6 +56,7 @@ import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
 import com.johnsonyuen.signalbackup.domain.model.UploadProgress
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
 import com.johnsonyuen.signalbackup.domain.usecase.ManualUploadUseCase
+import com.johnsonyuen.signalbackup.worker.UploadWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -185,8 +186,9 @@ class HomeViewModel @Inject constructor(
                         WorkInfo.State.RUNNING -> UploadStatus.Uploading
 
                         WorkInfo.State.SUCCEEDED -> UploadStatus.Success(
-                            fileName = "Backup uploaded",
-                            fileSizeBytes = 0
+                            fileName = workInfo.outputData.getString(UploadWorker.KEY_OUTPUT_FILE_NAME)
+                                ?: "Backup uploaded",
+                            fileSizeBytes = workInfo.outputData.getLong(UploadWorker.KEY_OUTPUT_FILE_SIZE, 0)
                         )
 
                         WorkInfo.State.FAILED -> UploadStatus.Failed(
