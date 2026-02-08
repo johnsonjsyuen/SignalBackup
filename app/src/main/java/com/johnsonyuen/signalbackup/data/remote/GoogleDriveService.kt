@@ -421,7 +421,10 @@ class GoogleDriveService @Inject constructor(
                 }
                 308 -> {
                     // Resume Incomplete -- parse how many bytes Google has confirmed.
-                    val rangeHeader = response.headers["Range"] as? String
+                    // Use the direct property accessor for reliability; the generic
+                    // get("Range") can return a non-String type in some client versions.
+                    val rangeHeader = response.headers.range
+                    Log.d(TAG, "Chunk 308 Range header: '$rangeHeader'")
                     val confirmedBytes = parseConfirmedBytes(rangeHeader)
                     Log.d(TAG, "Chunk uploaded, confirmed bytes: $confirmedBytes")
                     ChunkUploadResult.InProgress(confirmedBytes)
@@ -474,7 +477,8 @@ class GoogleDriveService @Inject constructor(
                     totalBytes
                 }
                 308 -> {
-                    val rangeHeader = response.headers["Range"] as? String
+                    val rangeHeader = response.headers.range
+                    Log.d(TAG, "Session query Range header: '$rangeHeader'")
                     val confirmedBytes = parseConfirmedBytes(rangeHeader)
                     Log.d(TAG, "Session query: $confirmedBytes bytes confirmed")
                     confirmedBytes

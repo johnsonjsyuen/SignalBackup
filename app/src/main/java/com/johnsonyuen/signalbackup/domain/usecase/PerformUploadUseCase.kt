@@ -76,6 +76,7 @@ class PerformUploadUseCase @Inject constructor(
         context: Context,
         progressListener: UploadProgressListener? = null,
     ): UploadStatus = withContext(Dispatchers.IO) {
+        Log.d(TAG, "invoke() called, progressListener=${if (progressListener != null) "SET" else "NULL"}")
         Log.d(TAG, "Starting upload (checking for resumable session)")
 
         // Step 1: Read the configured folders from settings.
@@ -354,6 +355,7 @@ class PerformUploadUseCase @Inject constructor(
     ): String {
         var currentOffset = offset
         val buffer = ByteArray(CHUNK_SIZE)
+        var noProgressCount = 0
 
         // Open the stream and skip to the starting offset if resuming.
         var stream = openStreamAtOffset(context, fileUri, currentOffset)
@@ -403,12 +405,40 @@ class PerformUploadUseCase @Inject constructor(
 
                 when (result) {
                     is GoogleDriveService.ChunkUploadResult.InProgress -> {
+                        if (result.confirmedBytes <= currentOffset) {
+                            // No progress was made — Google did not accept the chunk.
+                            noProgressCount++
+                            Log.w(
+                                TAG,
+                                "No progress: server confirmed ${result.confirmedBytes} " +
+                                    "bytes but we sent from offset $currentOffset " +
+                                    "(attempt $noProgressCount/$MAX_NO_PROGRESS_RETRIES)"
+                            )
+                            if (noProgressCount >= MAX_NO_PROGRESS_RETRIES) {
+                                throw IllegalStateException(
+                                    "Upload stuck: server confirmed ${result.confirmedBytes} " +
+                                        "bytes after $MAX_NO_PROGRESS_RETRIES attempts " +
+                                        "at offset $currentOffset"
+                                )
+                            }
+                            // Re-open the stream at currentOffset since the stream position
+                            // has advanced past the data we need to re-send.
+                            stream.close()
+                            stream = openStreamAtOffset(context, fileUri, currentOffset)
+                                ?: throw IllegalStateException(
+                                    "Cannot re-open backup file at $fileUri"
+                                )
+                            continue
+                        }
+                        noProgressCount = 0
                         currentOffset = result.confirmedBytes
+                        Log.d(TAG, "Chunk uploaded: offset=$currentOffset total=$totalBytes")
                         // Persist the updated byte count so a retry can resume here.
                         settingsRepository.updateResumableBytesUploaded(currentOffset)
                         progressListener?.invoke(currentOffset, totalBytes)
                     }
                     is GoogleDriveService.ChunkUploadResult.Complete -> {
+                        Log.d(TAG, "Chunk uploaded: COMPLETE offset=$totalBytes total=$totalBytes")
                         progressListener?.invoke(totalBytes, totalBytes)
                         return result.driveFileId
                     }
@@ -519,5 +549,11 @@ class PerformUploadUseCase @Inject constructor(
          * final chunk which can be any size.
          */
         private const val CHUNK_SIZE = GoogleDriveService.UPLOAD_CHUNK_SIZE
+
+        /**
+         * Maximum number of consecutive chunk uploads that make no progress before
+         * we abort with an error instead of looping indefinitely.
+         */
+        private const val MAX_NO_PROGRESS_RETRIES = 3
     }
 }
