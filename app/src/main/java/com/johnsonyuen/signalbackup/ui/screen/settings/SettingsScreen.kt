@@ -33,7 +33,13 @@
  */
 package com.johnsonyuen.signalbackup.ui.screen.settings
 
+import android.app.AlarmManager
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -47,6 +53,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.johnsonyuen.signalbackup.BuildConfig
 import com.johnsonyuen.signalbackup.domain.model.ThemeMode
@@ -92,6 +100,20 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
     var showTimePicker by remember { mutableStateOf(false) }
     var showDrivePicker by remember { mutableStateOf(false) }
     var showThemeDialog by remember { mutableStateOf(false) }
+
+    // Permission state - re-checked when returning from system Settings
+    var canScheduleExactAlarms by remember { mutableStateOf(true) }
+    var isIgnoringBatteryOptimizations by remember { mutableStateOf(true) }
+
+    // Re-check permissions every time the screen resumes (e.g., returning from Settings)
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            canScheduleExactAlarms = alarmManager.canScheduleExactAlarms()
+        }
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        isIgnoringBatteryOptimizations = powerManager.isIgnoringBatteryOptimizations(context.packageName)
+    }
 
     // -----------------------------------------------------------------------
     // SAF folder picker launcher.
@@ -180,6 +202,72 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                         }
                     }
                 )
+            }
+
+            // Warning: Exact alarm permission not granted
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !canScheduleExactAlarms) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    ListItem(
+                        headlineContent = { Text("Exact alarm permission required") },
+                        supportingContent = { Text("Scheduled backups need permission to fire at the exact time.") },
+                        leadingContent = {
+                            Icon(
+                                Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        trailingContent = {
+                            TextButton(onClick = {
+                                context.startActivity(
+                                    Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                                        data = Uri.parse("package:${context.packageName}")
+                                    }
+                                )
+                            }) {
+                                Text("Grant")
+                            }
+                        }
+                    )
+                }
+            }
+
+            // Warning: Battery optimization active
+            if (!isIgnoringBatteryOptimizations) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    ListItem(
+                        headlineContent = { Text("Battery optimization active") },
+                        supportingContent = { Text("Disable battery optimization so scheduled backups are not killed.") },
+                        leadingContent = {
+                            Icon(
+                                Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        trailingContent = {
+                            TextButton(onClick = {
+                                context.startActivity(
+                                    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                        data = Uri.parse("package:${context.packageName}")
+                                    }
+                                )
+                            }) {
+                                Text("Disable")
+                            }
+                        }
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
