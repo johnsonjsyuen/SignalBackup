@@ -43,10 +43,12 @@ import com.johnsonyuen.signalbackup.data.repository.UploadProgressListener
 import com.johnsonyuen.signalbackup.domain.model.ResumableUploadSession
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.security.MessageDigest
+import kotlin.coroutines.coroutineContext
 import javax.inject.Inject
 
 /**
@@ -432,6 +434,11 @@ class PerformUploadUseCase @Inject constructor(
 
         try {
             while (currentOffset < totalBytes) {
+                // Check if the coroutine has been cancelled (e.g., WorkManager stopped the worker).
+                // This is the primary cancellation checkpoint -- without it, the upload loop
+                // continues making network requests even after cancellation.
+                coroutineContext.ensureActive()
+
                 // Read up to CHUNK_SIZE bytes from the stream.
                 val bytesToRead = minOf(CHUNK_SIZE.toLong(), totalBytes - currentOffset).toInt()
                 var bytesRead = readFully(stream, buffer, bytesToRead)

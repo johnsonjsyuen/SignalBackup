@@ -48,8 +48,10 @@ import com.johnsonyuen.signalbackup.data.local.datastore.SettingsDataStore
 import com.johnsonyuen.signalbackup.data.repository.UploadProgressListener
 import com.johnsonyuen.signalbackup.domain.model.DriveFolder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import java.io.InputStream
 import javax.inject.Inject
 
@@ -360,6 +362,7 @@ class GoogleDriveService @Inject constructor(
             set("X-Upload-Content-Length", totalBytes)
         }
 
+        coroutineContext.ensureActive()
         val response = request.execute()
         try {
             val sessionUri = response.headers.location
@@ -411,6 +414,7 @@ class GoogleDriveService @Inject constructor(
         request.throwExceptionOnExecuteError = false
 
         Log.d(TAG, "Uploading chunk: $contentRange")
+        coroutineContext.ensureActive()
         val response = request.execute()
         try {
             when (response.statusCode) {
@@ -471,6 +475,7 @@ class GoogleDriveService @Inject constructor(
         request.throwExceptionOnExecuteError = false
 
         Log.d(TAG, "Querying session progress: $sessionUri")
+        coroutineContext.ensureActive()
         val response = request.execute()
         try {
             when (response.statusCode) {
