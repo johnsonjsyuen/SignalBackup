@@ -1,3 +1,29 @@
+/**
+ * StatusCard.kt - A card component that visually represents the current upload status.
+ *
+ * This composable renders a Material3 Card that changes its appearance (background color,
+ * icon, and text) based on the current [UploadStatus]. It acts as the primary visual
+ * indicator on the Home screen, giving the user immediate feedback about what the app
+ * is doing.
+ *
+ * Status-to-appearance mapping:
+ * | Status       | Background Color     | Icon / Indicator        | Text                     |
+ * |--------------|---------------------|-------------------------|--------------------------|
+ * | Idle         | surfaceVariant       | HourglassEmpty          | "No upload in progress"  |
+ * | Uploading    | secondaryContainer   | CircularProgressIndicator | "Uploading backup..."  |
+ * | Success      | primaryContainer     | CheckCircle (primary)   | File name + size         |
+ * | Failed       | errorContainer       | Error (error color)     | Error message            |
+ * | NeedsConsent | secondaryContainer   | CircularProgressIndicator | "Requesting permission"|
+ *
+ * Compose concepts used:
+ * - **when expression on sealed interface**: Exhaustive matching ensures every status
+ *   variant is handled. If a new status is added, the compiler will flag it.
+ * - **CardDefaults.cardColors()**: Overrides the card's container color per-status.
+ * - **CircularProgressIndicator**: An indeterminate progress spinner used for active states.
+ *
+ * @see domain.model.UploadStatus for the sealed interface defining all possible states
+ * @see ui.screen.home.HomeScreen where this card is displayed
+ */
 package com.johnsonyuen.signalbackup.ui.component
 
 import androidx.compose.foundation.layout.Arrangement
@@ -23,10 +49,18 @@ import androidx.compose.ui.unit.dp
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
 import com.johnsonyuen.signalbackup.util.formatFileSize
 
+/**
+ * Displays the current upload status as a styled card.
+ *
+ * @param status The current [UploadStatus] from the ViewModel.
+ * @param modifier Optional Modifier for layout customization by the caller.
+ */
 @Composable
 fun StatusCard(status: UploadStatus, modifier: Modifier = Modifier) {
     Card(
         modifier = modifier.fillMaxWidth(),
+        // Dynamic card background color based on status -- success is green-ish,
+        // error is red-ish, active states use secondary, idle uses neutral surface.
         colors = CardDefaults.cardColors(
             containerColor = when (status) {
                 is UploadStatus.Success -> MaterialTheme.colorScheme.primaryContainer
@@ -42,6 +76,7 @@ fun StatusCard(status: UploadStatus, modifier: Modifier = Modifier) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // Render different icon + text combinations for each status variant.
             when (status) {
                 is UploadStatus.Idle -> {
                     Icon(Icons.Default.HourglassEmpty, contentDescription = null)
@@ -49,6 +84,7 @@ fun StatusCard(status: UploadStatus, modifier: Modifier = Modifier) {
                 }
 
                 is UploadStatus.Uploading -> {
+                    // Indeterminate spinner -- upload is in progress.
                     CircularProgressIndicator(
                         modifier = Modifier.size(24.dp),
                         strokeWidth = 2.dp
@@ -64,6 +100,7 @@ fun StatusCard(status: UploadStatus, modifier: Modifier = Modifier) {
                     )
                     Column {
                         Text("Upload successful", style = MaterialTheme.typography.bodyLarge)
+                        // Show the uploaded file name and human-readable size (e.g., "12.3 MB").
                         Text(
                             "${status.fileName} (${formatFileSize(status.fileSizeBytes)})",
                             style = MaterialTheme.typography.bodySmall
@@ -79,11 +116,14 @@ fun StatusCard(status: UploadStatus, modifier: Modifier = Modifier) {
                     )
                     Column {
                         Text("Upload failed", style = MaterialTheme.typography.bodyLarge)
+                        // Display the error message from the failed upload attempt.
                         Text(status.error, style = MaterialTheme.typography.bodySmall)
                     }
                 }
 
                 is UploadStatus.NeedsConsent -> {
+                    // The user needs to grant Drive permission -- show a spinner
+                    // while the consent UI is launching.
                     CircularProgressIndicator(
                         modifier = Modifier.size(24.dp),
                         strokeWidth = 2.dp
@@ -94,4 +134,3 @@ fun StatusCard(status: UploadStatus, modifier: Modifier = Modifier) {
         }
     }
 }
-
