@@ -55,6 +55,7 @@ import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
 import com.johnsonyuen.signalbackup.domain.model.UploadProgress
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
 import com.johnsonyuen.signalbackup.domain.usecase.ManualUploadUseCase
+import com.johnsonyuen.signalbackup.receiver.UploadAlarmReceiver
 import com.johnsonyuen.signalbackup.worker.UploadWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -288,6 +289,6 @@ class HomeViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "HomeViewModel"
-        private const val SCHEDULED_WORK_NAME = "signal_backup_scheduled_upload"
+        private const val SCHEDULED_WORK_NAME = UploadAlarmReceiver.WORK_NAME
     }
 }
