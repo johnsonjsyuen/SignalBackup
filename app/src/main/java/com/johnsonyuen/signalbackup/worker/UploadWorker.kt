@@ -197,6 +197,8 @@ class UploadWorker @AssistedInject constructor(
      * @param totalBytes Total file size in bytes.
      */
     private fun onUploadProgress(bytesUploaded: Long, totalBytes: Long) {
+        Log.d(TAG, "onUploadProgress: $bytesUploaded / $totalBytes (${(bytesUploaded * 100 / totalBytes.coerceAtLeast(1))}%)")
+
         val elapsedMs = System.currentTimeMillis() - uploadStartTimeMs
         // Avoid division by zero in the first millisecond.
         val elapsedSec = (elapsedMs / 1000.0).coerceAtLeast(0.001)

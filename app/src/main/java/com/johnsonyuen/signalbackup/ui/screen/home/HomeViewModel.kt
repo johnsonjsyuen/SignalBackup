@@ -96,8 +96,16 @@ class HomeViewModel @Inject constructor(
     // Upload progress -- collected directly from UploadWorker's static flow.
     // -----------------------------------------------------------------------
 
-    /** Upload progress observed by the Home screen UI. */
+    /**
+     * Upload progress observed by the Home screen UI.
+     *
+     * Uses stateIn() to bridge the static companion object flow into viewModelScope.
+     * This ensures that collectAsStateWithLifecycle() in Compose properly receives
+     * emissions -- a direct reference to the companion StateFlow can miss updates
+     * because there is no active coroutine relaying values to the Compose collector.
+     */
     val uploadProgress: StateFlow<UploadProgress?> = UploadWorker.progressFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     init {
         // Observe the manual upload work status and map it to our UploadStatus.
