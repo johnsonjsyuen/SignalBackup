@@ -25,7 +25,6 @@ package com.johnsonyuen.signalbackup.data.repository
 
 import com.johnsonyuen.signalbackup.data.remote.GoogleDriveService
 import com.johnsonyuen.signalbackup.domain.model.DriveFolder
-import java.io.InputStream
 
 /**
  * Callback invoked by the upload layer to report progress.
@@ -39,32 +38,6 @@ typealias UploadProgressListener = (bytesUploaded: Long, totalBytes: Long) -> Un
  * Contract for Google Drive file and folder operations.
  */
 interface DriveRepository {
-
-    /**
-     * Uploads a file to Google Drive using the client library's built-in resumable upload.
-     *
-     * NOTE: This is a single-process upload method. For cross-process resumable uploads
-     * (surviving app kills), use [initiateResumableUpload] + [uploadChunk] instead.
-     * [PerformUploadUseCase] uses the manual protocol exclusively; this method is retained
-     * as a simpler alternative for potential future use.
-     *
-     * @param folderId The Drive folder ID to upload into.
-     * @param fileName The name for the uploaded file.
-     * @param mimeType The MIME type of the file content.
-     * @param inputStream The file content stream (consumed by this method).
-     * @param fileSize The total size of the file in bytes, used for progress tracking.
-     *        Pass 0 if unknown (progress percentage will not be available).
-     * @param progressListener Optional callback invoked as chunks are uploaded.
-     * @return The Drive file ID of the newly created file.
-     */
-    suspend fun uploadFile(
-        folderId: String,
-        fileName: String,
-        mimeType: String,
-        inputStream: InputStream,
-        fileSize: Long = 0L,
-        progressListener: UploadProgressListener? = null,
-    ): String
 
     /**
      * Lists subfolders in a Drive folder.

@@ -216,17 +216,11 @@ dependencies {
     implementation(libs.google.api.services.drive)
 
     // ---------------------------------------------------------------------------
-    // Google Sign-In / Credentials
+    // Google Sign-In
     // ---------------------------------------------------------------------------
     // Play Services Auth -- GoogleSignIn, GoogleSignInOptions, GoogleSignInClient.
     // Note: GoogleSignIn is deprecated but still functional for Drive scope requests.
     implementation(libs.play.services.auth)
-    // AndroidX Credentials API -- modern credential management (future migration path).
-    implementation(libs.credentials)
-    // Credentials integration with Play Services.
-    implementation(libs.credentials.play.services)
-    // Google Identity library -- AuthorizationClient for OAuth consent.
-    implementation(libs.googleid)
 
     // ---------------------------------------------------------------------------
     // Jackson (JSON Parsing)

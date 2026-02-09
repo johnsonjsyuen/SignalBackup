@@ -1,9 +1,8 @@
 /**
  * DriveModule.kt - Hilt module providing Google Drive authentication dependencies.
  *
- * This module provides the objects needed for Google Drive API authentication:
- * - [GoogleAccountCredential]: The OAuth2 credential used to authenticate Drive API calls.
- * - [AuthorizationClient]: Used by the UI to request OAuth consent from the user.
+ * This module provides the [GoogleAccountCredential] needed for Google Drive API
+ * authentication.
  *
  * Authentication flow overview:
  * 1. User signs in via GoogleSignIn on the Home screen.
@@ -16,8 +15,8 @@
  *
  * Architecture context:
  * - Part of the **DI layer** (di package).
- * - Both providers are singletons because there should be exactly one credential
- *   and one authorization client instance per app.
+ * - The credential provider is a singleton because there should be exactly one
+ *   credential instance per app.
  *
  * @see data.remote.GoogleDriveService for where the credential is used
  * @see ui.screen.home.HomeScreen for where sign-in and consent are handled
@@ -25,8 +24,6 @@
 package com.johnsonyuen.signalbackup.di
 
 import android.content.Context
-import com.google.android.gms.auth.api.identity.AuthorizationClient
-import com.google.android.gms.auth.api.identity.Identity
 import com.google.api.client.googleapis.extensions.android.gms.auth.GoogleAccountCredential
 import com.google.api.services.drive.DriveScopes
 import dagger.Module
@@ -62,15 +59,4 @@ object DriveModule {
             context,
             listOf(DriveScopes.DRIVE)
         )
-
-    /**
-     * Provides the Google Identity AuthorizationClient.
-     *
-     * Used to request authorization (OAuth consent) from the user for Drive access.
-     * This is part of Google's newer Identity Services API.
-     */
-    @Provides
-    @Singleton
-    fun provideAuthorizationClient(@ApplicationContext context: Context): AuthorizationClient =
-        Identity.getAuthorizationClient(context)
 }

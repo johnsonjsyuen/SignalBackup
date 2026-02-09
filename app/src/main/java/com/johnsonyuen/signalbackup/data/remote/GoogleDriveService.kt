@@ -2,8 +2,7 @@
  * GoogleDriveService.kt - Google Drive API wrapper for file and folder operations.
  *
  * This class encapsulates all direct interactions with the Google Drive REST API v3.
- * It provides folder operations (list and create), a high-level upload via the Google
- * client library's MediaHttpUploader, and a low-level manual resumable upload protocol
+ * It provides folder operations (list and create) and a manual resumable upload protocol
  * (initiate, upload chunk, query progress) for cross-process upload resumption.
  *
  * Architecture context:
@@ -34,25 +33,21 @@ package com.johnsonyuen.signalbackup.data.remote
 
 import android.util.Log
 import com.google.api.client.googleapis.extensions.android.gms.auth.GoogleAccountCredential
-import com.google.api.client.googleapis.media.MediaHttpUploader
 import com.google.api.client.http.ByteArrayContent
 import com.google.api.client.http.GenericUrl
 import com.google.api.client.http.HttpRequestInitializer
 import com.google.api.client.http.HttpResponseException
-import com.google.api.client.http.InputStreamContent
 import com.google.api.client.http.javanet.NetHttpTransport
 import com.google.api.client.http.json.JsonHttpContent
 import com.google.api.client.json.gson.GsonFactory
 import com.google.api.services.drive.Drive
 import com.johnsonyuen.signalbackup.data.local.datastore.SettingsDataStore
-import com.johnsonyuen.signalbackup.data.repository.UploadProgressListener
 import com.johnsonyuen.signalbackup.domain.model.DriveFolder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
-import java.io.InputStream
 import javax.inject.Inject
 
 /**
@@ -119,102 +114,6 @@ class GoogleDriveService @Inject constructor(
         val email = settingsDataStore.googleAccountEmail.first()
             ?: throw IllegalStateException("No Google account configured. Please sign in first.")
         credential.selectedAccountName = email
-    }
-
-    /**
-     * Uploads a file to Google Drive using the Google client library's resumable media upload.
-     *
-     * NOTE: This method handles resumable upload within a single process lifecycle only.
-     * For cross-process resumable uploads (surviving app kills), the manual resumable upload
-     * methods below ([initiateResumableUpload], [uploadChunk], [querySessionProgress]) are
-     * used instead. [PerformUploadUseCase] uses the manual protocol exclusively; this method
-     * is retained as a simpler alternative for potential future use with smaller files.
-     *
-     * Creates a new file in the specified Drive folder with the given content.
-     * The upload uses the Google API client's resumable upload protocol, which splits
-     * the file into chunks and uploads them sequentially. If a chunk fails due to a
-     * transient network error, the client retries that chunk without re-uploading the
-     * entire file.
-     *
-     * Configuration:
-     * - **Chunk size**: 5 MB. Smaller chunks mean more HTTP requests but better resilience
-     *   to interruptions. 5 MB is a good balance for mobile networks.
-     * - **Resumable upload**: Enabled via `mediaHttpUploader.isDirectUploadEnabled = false`.
-     *   The Google client library handles the resumable upload protocol automatically.
-     * - **Timeouts**: Connect and read timeouts are set to 2 minutes each on the HTTP
-     *   request factory. This prevents indefinite hangs on stalled connections.
-     *
-     * @param folderId The Google Drive folder ID to upload into.
-     * @param fileName The name for the file in Drive.
-     * @param mimeType The MIME type of the file content (typically "application/octet-stream").
-     * @param inputStream The file content to upload. This stream is consumed and should
-     *        not be reused after this call.
-     * @param fileSize Total size of the file in bytes, used by the progress listener to
-     *        report meaningful progress. Pass 0 if unknown.
-     * @param progressListener Optional callback invoked after each chunk is uploaded,
-     *        receiving the bytes uploaded so far and the total file size.
-     * @return The Google Drive file ID of the newly uploaded file.
-     * @throws com.google.api.client.googleapis.extensions.android.gms.auth.UserRecoverableAuthIOException
-     *         if the OAuth token is expired or the Drive scope hasn't been granted.
-     */
-    suspend fun uploadFile(
-        folderId: String,
-        fileName: String,
-        mimeType: String,
-        inputStream: InputStream,
-        fileSize: Long = 0L,
-        progressListener: UploadProgressListener? = null,
-    ): String = withContext(Dispatchers.IO) {
-        ensureAccount()
-
-        // Create Drive file metadata specifying the name and parent folder.
-        val fileMetadata = com.google.api.services.drive.model.File().apply {
-            name = fileName
-            parents = listOf(folderId)
-        }
-
-        // Wrap the InputStream in Drive's InputStreamContent for the upload.
-        // Setting the length enables the progress listener to report accurate percentages
-        // and allows the Google client to set Content-Length headers.
-        val mediaContent = InputStreamContent(mimeType, inputStream).apply {
-            if (fileSize > 0) {
-                length = fileSize
-            }
-        }
-
-        // Build the create request. setFields("id") tells Drive to only return the file ID
-        // in the response, reducing bandwidth and parsing overhead.
-        val createRequest = drive.files().create(fileMetadata, mediaContent)
-            .setFields("id")
-
-        // Configure the uploader to use resumable upload with smaller chunks.
-        // Resumable upload splits the file into chunks and uploads them sequentially.
-        // If a chunk fails, only that chunk is retried -- not the entire file.
-        createRequest.mediaHttpUploader?.apply {
-            // Disable direct upload to enable resumable upload protocol.
-            isDirectUploadEnabled = false
-            // 5 MB chunks balance between network resilience and request overhead.
-            chunkSize = UPLOAD_CHUNK_SIZE
-            Log.d(TAG, "Uploading $fileName with resumable upload, chunk size: ${chunkSize / 1024 / 1024} MB")
-
-            // Wire up the progress listener to report chunk-level progress.
-            // MediaHttpUploader calls this after each chunk upload and on completion.
-            if (progressListener != null) {
-                setProgressListener { uploader ->
-                    val bytesUploaded = when (uploader.uploadState) {
-                        MediaHttpUploader.UploadState.MEDIA_IN_PROGRESS ->
-                            uploader.numBytesUploaded
-                        MediaHttpUploader.UploadState.MEDIA_COMPLETE ->
-                            fileSize
-                        else -> 0L
-                    }
-                    progressListener(bytesUploaded, fileSize)
-                }
-            }
-        }
-
-        val file = createRequest.execute()
-        file.id
     }
 
     /**

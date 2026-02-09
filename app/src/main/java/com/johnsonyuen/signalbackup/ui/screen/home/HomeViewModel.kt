@@ -192,28 +192,7 @@ class HomeViewModel @Inject constructor(
                     // getWorkInfosForUniqueWork returns a list, but we only ever have one
                     // work request for this unique name (KEEP policy). Take the first.
                     val workInfo = workInfos.firstOrNull() ?: return@collect
-
-                    val newStatus = when (workInfo.state) {
-                        WorkInfo.State.ENQUEUED,
-                        WorkInfo.State.BLOCKED,
-                        WorkInfo.State.RUNNING -> UploadStatus.Uploading
-
-                        WorkInfo.State.SUCCEEDED -> UploadStatus.Success(
-                            fileName = workInfo.outputData.getString(UploadWorker.KEY_OUTPUT_FILE_NAME)
-                                ?: "Backup uploaded",
-                            fileSizeBytes = workInfo.outputData.getLong(UploadWorker.KEY_OUTPUT_FILE_SIZE, 0)
-                        )
-
-                        WorkInfo.State.FAILED -> UploadStatus.Failed(
-                            "Upload failed. Check history for details."
-                        )
-
-                        WorkInfo.State.CANCELLED -> UploadStatus.Failed(
-                            "Upload was cancelled"
-                        )
-                    }
-
-                    _uploadStatus.value = newStatus
+                    _uploadStatus.value = mapWorkInfoToStatus(workInfo)
                 }
         }
     }
@@ -230,29 +209,42 @@ class HomeViewModel @Inject constructor(
             workManager.getWorkInfosForUniqueWorkFlow(SCHEDULED_WORK_NAME)
                 .collect { workInfos ->
                     val workInfo = workInfos.firstOrNull() ?: return@collect
-
-                    val newStatus = when (workInfo.state) {
-                        WorkInfo.State.ENQUEUED,
-                        WorkInfo.State.BLOCKED,
-                        WorkInfo.State.RUNNING -> UploadStatus.Uploading
-
-                        WorkInfo.State.SUCCEEDED -> UploadStatus.Success(
-                            fileName = workInfo.outputData.getString(UploadWorker.KEY_OUTPUT_FILE_NAME)
-                                ?: "Backup uploaded",
-                            fileSizeBytes = workInfo.outputData.getLong(UploadWorker.KEY_OUTPUT_FILE_SIZE, 0)
-                        )
-
-                        WorkInfo.State.FAILED -> UploadStatus.Failed(
-                            "Upload failed. Check history for details."
-                        )
-
-                        WorkInfo.State.CANCELLED -> UploadStatus.Failed(
-                            "Upload was cancelled"
-                        )
-                    }
-
-                    _uploadStatus.value = newStatus
+                    _uploadStatus.value = mapWorkInfoToStatus(workInfo)
                 }
+        }
+    }
+
+    /**
+     * Maps a [WorkInfo] to the corresponding [UploadStatus].
+     *
+     * This is the single source of truth for converting WorkManager states to the
+     * UI-facing upload status, used by both manual and scheduled upload observers.
+     *
+     * Mapping:
+     * - ENQUEUED, BLOCKED, RUNNING -> [UploadStatus.Uploading]
+     * - SUCCEEDED -> [UploadStatus.Success] with file name and size from output data
+     * - FAILED -> [UploadStatus.Failed] with a generic failure message
+     * - CANCELLED -> [UploadStatus.Failed] with a cancellation message
+     */
+    private fun mapWorkInfoToStatus(workInfo: WorkInfo): UploadStatus {
+        return when (workInfo.state) {
+            WorkInfo.State.ENQUEUED,
+            WorkInfo.State.BLOCKED,
+            WorkInfo.State.RUNNING -> UploadStatus.Uploading
+
+            WorkInfo.State.SUCCEEDED -> UploadStatus.Success(
+                fileName = workInfo.outputData.getString(UploadWorker.KEY_OUTPUT_FILE_NAME)
+                    ?: "Backup uploaded",
+                fileSizeBytes = workInfo.outputData.getLong(UploadWorker.KEY_OUTPUT_FILE_SIZE, 0)
+            )
+
+            WorkInfo.State.FAILED -> UploadStatus.Failed(
+                "Upload failed. Check history for details."
+            )
+
+            WorkInfo.State.CANCELLED -> UploadStatus.Failed(
+                "Upload was cancelled"
+            )
         }
     }
 

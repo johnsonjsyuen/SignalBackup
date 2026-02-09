@@ -15,7 +15,7 @@
  * Architecture context:
  * - Part of the **domain layer** (domain/usecase package).
  * - Called by [HomeViewModel.uploadNow()] for manual uploads.
- * - Returns the WorkManager work ID so the ViewModel can observe its progress.
+ * - The ViewModel observes its progress via WorkManager's unique work name.
  *
  * @see worker.UploadWorker for the worker that actually performs the upload
  * @see PerformUploadUseCase for the actual upload logic inside the worker
@@ -31,14 +31,13 @@ import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.johnsonyuen.signalbackup.worker.UploadWorker
-import java.util.UUID
 import javax.inject.Inject
 
 /**
  * Use case that enqueues a one-time manual upload via WorkManager.
  *
- * Returns the [UUID] of the enqueued work so the caller can observe its state
- * (e.g., to update the UI with uploading/success/failed status).
+ * The caller observes upload state via WorkManager's unique work name
+ * ([WORK_NAME]) rather than a work request ID.
  *
  * @param workManager The WorkManager instance for enqueueing work requests.
  */
@@ -54,10 +53,8 @@ class ManualUploadUseCase @Inject constructor(
      *
      * Uses [ExistingWorkPolicy.KEEP] to prevent duplicate manual uploads --
      * if an upload is already running, the new request is ignored.
-     *
-     * @return The [UUID] of the enqueued work request, for observing its state.
      */
-    operator fun invoke(): UUID {
+    operator fun invoke() {
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
@@ -73,8 +70,6 @@ class ManualUploadUseCase @Inject constructor(
             ExistingWorkPolicy.KEEP,
             request
         )
-
-        return request.id
     }
 
     companion object {

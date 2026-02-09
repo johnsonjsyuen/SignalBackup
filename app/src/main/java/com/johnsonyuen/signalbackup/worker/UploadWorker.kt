@@ -201,7 +201,7 @@ class UploadWorker @AssistedInject constructor(
 
         val elapsedMs = System.currentTimeMillis() - uploadStartTimeMs
         // Avoid division by zero in the first millisecond.
-        val elapsedSec = (elapsedMs / 1000.0).coerceAtLeast(0.001)
+        val elapsedSec = (elapsedMs / 1000.0).coerceAtLeast(MIN_ELAPSED_SECONDS)
 
         val speedBytesPerSec = (bytesUploaded / elapsedSec).toLong()
 
@@ -255,7 +255,7 @@ class UploadWorker @AssistedInject constructor(
                 .setContentText(contentText)
                 .setSmallIcon(android.R.drawable.ic_menu_upload)
                 .setOngoing(true)
-                .setProgress(100, progress.percentComplete, false)
+                .setProgress(PROGRESS_MAX, progress.percentComplete, false)
                 .build()
 
             notificationManager.notify(NOTIFICATION_ID, notification)
@@ -375,7 +375,7 @@ class UploadWorker @AssistedInject constructor(
         // Build a minimal, non-intrusive notification with indeterminate progress.
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setContentTitle(applicationContext.getString(R.string.upload_notification_title))
-            .setContentText("Preparing upload...")
+            .setContentText(NOTIFICATION_PREPARING_TEXT)
             .setSmallIcon(android.R.drawable.ic_menu_upload)
             .setOngoing(true)
             .setProgress(0, 0, true)
@@ -411,6 +411,15 @@ class UploadWorker @AssistedInject constructor(
          * in the finally block of doWork().
          */
         private const val LOCK_TIMEOUT_MS = 30L * 60L * 1000L
+
+        /** Maximum value for the notification progress bar (represents 100%). */
+        private const val PROGRESS_MAX = 100
+
+        /** Minimum elapsed seconds for speed calculation to avoid division by zero. */
+        private const val MIN_ELAPSED_SECONDS = 0.001
+
+        /** Default notification content text shown while the upload is being prepared. */
+        private const val NOTIFICATION_PREPARING_TEXT = "Preparing upload..."
 
         /**
          * Input data key that indicates whether this is a manual upload (user-triggered).
