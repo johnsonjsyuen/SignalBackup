@@ -7,13 +7,17 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import com.johnsonyuen.signalbackup.data.local.datastore.SettingsDataStore
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
+import com.johnsonyuen.signalbackup.data.local.datastore.dataStore
 import com.johnsonyuen.signalbackup.worker.UploadWorker
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
@@ -22,8 +26,16 @@ class UploadAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         Log.d(TAG, "Alarm fired, enqueuing scheduled upload work")
 
+        // Read the Wi-Fi only preference from DataStore.
+        // runBlocking is acceptable here because onReceive() runs on the main thread
+        // with a short time limit, and DataStore reads from disk are fast.
+        val wifiOnly = runBlocking {
+            context.dataStore.data.first()[SettingsDataStore.Keys.WIFI_ONLY] ?: false
+        }
+        val networkType = if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED
+
         val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .setRequiredNetworkType(networkType)
             .setRequiresBatteryNotLow(true)
             .build()
 

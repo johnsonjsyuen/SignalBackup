@@ -30,6 +30,8 @@
 package com.johnsonyuen.signalbackup.domain.usecase
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
@@ -42,6 +44,7 @@ import com.johnsonyuen.signalbackup.data.repository.UploadHistoryRepository
 import com.johnsonyuen.signalbackup.data.repository.UploadProgressListener
 import com.johnsonyuen.signalbackup.domain.model.ResumableUploadSession
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
+import com.johnsonyuen.signalbackup.domain.model.WifiRequiredException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
@@ -581,6 +584,46 @@ class PerformUploadUseCase @Inject constructor(
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Network constraint check
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Checks whether the device is currently on an unmetered (Wi-Fi) network.
+     *
+     * Uses [ConnectivityManager] and [NetworkCapabilities] to inspect the active network.
+     * Returns false if there is no active network or if the network is metered (mobile data).
+     *
+     * @param context Android Context for accessing system services.
+     * @return True if the active network is unmetered (Wi-Fi), false otherwise.
+     */
+    private fun isOnUnmeteredNetwork(context: Context): Boolean {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val capabilities = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+    }
+
+    /**
+     * Checks whether the Wi-Fi constraint is violated and throws if so.
+     *
+     * Reads the current "Wi-Fi only" setting from [settingsRepository] and, if enabled,
+     * verifies the device is on an unmetered network. If the device is on a metered network
+     * (e.g., mobile data), throws [WifiRequiredException] to abort the upload gracefully.
+     *
+     * The resumable session remains saved in DataStore, so the upload will resume from the
+     * last confirmed byte offset when Wi-Fi becomes available and WorkManager retries.
+     *
+     * @param context Android Context for network state inspection.
+     * @throws WifiRequiredException if Wi-Fi is required but the network is metered.
+     */
+    private suspend fun checkWifiConstraint(context: Context) {
+        val wifiOnly = settingsRepository.wifiOnly.first()
+        if (wifiOnly && !isOnUnmeteredNetwork(context)) {
+            Log.w(TAG, "Wi-Fi only enabled but device is on a metered network, aborting upload")
+            throw WifiRequiredException()
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Chunked upload
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -623,6 +666,7 @@ class PerformUploadUseCase @Inject constructor(
         var currentOffset = offset
         val buffer = ByteArray(CHUNK_SIZE)
         var noProgressCount = 0
+        var chunkCount = 0
 
         // Open the stream and skip to the starting offset if resuming.
         var stream = openStreamAtOffset(context, fileUri, currentOffset)
@@ -637,6 +681,15 @@ class PerformUploadUseCase @Inject constructor(
                 // This is the primary cancellation checkpoint -- without it, the upload loop
                 // continues making network requests even after cancellation.
                 coroutineContext.ensureActive()
+
+                // Periodically verify the Wi-Fi constraint is still satisfied. Checking every
+                // WIFI_CHECK_INTERVAL chunks (each chunk is 5 MB, so roughly every 25 MB) avoids
+                // the overhead of reading DataStore on every single iteration while still catching
+                // a network switch reasonably quickly.
+                chunkCount++
+                if (chunkCount % WIFI_CHECK_INTERVAL == 0) {
+                    checkWifiConstraint(context)
+                }
 
                 // Read the next chunk, handling SAF stream invalidation.
                 val bytesToRead = minOf(CHUNK_SIZE.toLong(), totalBytes - currentOffset).toInt()
@@ -975,5 +1028,12 @@ class PerformUploadUseCase @Inject constructor(
          * we abort with an error instead of looping indefinitely.
          */
         private const val MAX_NO_PROGRESS_RETRIES = 3
+
+        /**
+         * How often (in chunks) to check the Wi-Fi constraint during upload.
+         * Each chunk is [CHUNK_SIZE] bytes (5 MB), so checking every 5 chunks means
+         * the network state is verified approximately every 25 MB of uploaded data.
+         */
+        private const val WIFI_CHECK_INTERVAL = 5
     }
 }

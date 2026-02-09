@@ -101,6 +101,10 @@ class SettingsViewModel @Inject constructor(
         .map { ThemeMode.fromString(it) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ThemeMode.SYSTEM)
 
+    /** Whether uploads should only occur on Wi-Fi (unmetered) networks. */
+    val wifiOnly: StateFlow<Boolean> = settingsRepository.wifiOnly
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
     // -----------------------------------------------------------------------
     // Drive folder picker state -- imperative, driven by API calls.
     // -----------------------------------------------------------------------
@@ -166,6 +170,13 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             settingsRepository.setScheduleTime(hour, minute)
             scheduleUploadUseCase()  // Reschedule WorkManager with the new time.
+        }
+    }
+
+    /** Sets the Wi-Fi only upload preference. */
+    fun setWifiOnly(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.setWifiOnly(enabled)
         }
     }
 

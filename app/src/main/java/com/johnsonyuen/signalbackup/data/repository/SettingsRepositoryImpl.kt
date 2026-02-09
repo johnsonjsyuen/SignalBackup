@@ -69,6 +69,9 @@ class SettingsRepositoryImpl @Inject constructor(
     override val themeMode: Flow<String>
         get() = settingsDataStore.themeMode
 
+    override val wifiOnly: Flow<Boolean>
+        get() = settingsDataStore.wifiOnly
+
     override suspend fun setLocalFolderUri(uri: String?) {
         settingsDataStore.setLocalFolderUri(uri)
     }
@@ -103,6 +106,10 @@ class SettingsRepositoryImpl @Inject constructor(
 
     override suspend fun setThemeMode(mode: String) {
         settingsDataStore.setThemeMode(mode)
+    }
+
+    override suspend fun setWifiOnly(enabled: Boolean) {
+        settingsDataStore.setWifiOnly(enabled)
     }
 
     // ---- Resumable upload session delegation ----

@@ -14,8 +14,10 @@
  *   which is safe to hold as a singleton because it outlives all Activities.
  *
  * Important: The DataStore delegate `by preferencesDataStore(name = "settings")` is defined
- * at the file level (outside the module) because DataStore MUST have exactly one instance
- * per file name -- creating multiple DataStore instances for the same file causes corruption.
+ * in [DataStoreExt.kt] as a shared `Context.dataStore` extension property. This allows both
+ * Hilt-injected components and non-DI components (e.g., BroadcastReceivers) to access the
+ * same DataStore instance. DataStore MUST have exactly one instance per file name --
+ * creating multiple instances for the same file causes corruption.
  *
  * @see di.DriveModule for Google Drive-related providers
  * @see di.RepositoryModule for repository interface bindings
@@ -25,9 +27,9 @@ package com.johnsonyuen.signalbackup.di
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
-import androidx.datastore.preferences.preferencesDataStore
 import androidx.room.Room
 import androidx.work.WorkManager
+import com.johnsonyuen.signalbackup.data.local.datastore.dataStore
 import com.johnsonyuen.signalbackup.data.local.db.AppDatabase
 import com.johnsonyuen.signalbackup.data.local.db.UploadHistoryDao
 import com.johnsonyuen.signalbackup.data.local.datastore.SettingsDataStore
@@ -37,13 +39,6 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
-
-/**
- * File-level DataStore delegate. This creates the "settings" preferences DataStore file.
- * MUST be defined once at the file level -- defining it inside a class or function would
- * create multiple instances, which DataStore explicitly forbids.
- */
-private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 /**
  * Hilt module that provides core singleton dependencies.
@@ -81,7 +76,8 @@ object AppModule {
     /**
      * Provides the raw Preferences DataStore instance.
      *
-     * Uses the file-level delegate property to ensure exactly one DataStore instance exists.
+     * Uses the shared [dataStore] extension property from DataStoreExt.kt to ensure
+     * exactly one DataStore instance exists across the entire app.
      */
     @Provides
     @Singleton

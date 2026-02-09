@@ -166,8 +166,10 @@ class HomeViewModel @Inject constructor(
      */
     fun uploadNow() {
         _uploadStatus.value = UploadStatus.Uploading
-        manualUploadUseCase()
-        Log.d(TAG, "Manual upload work enqueued via ManualUploadUseCase")
+        viewModelScope.launch {
+            manualUploadUseCase()
+            Log.d(TAG, "Manual upload work enqueued via ManualUploadUseCase")
+        }
     }
 
     /**

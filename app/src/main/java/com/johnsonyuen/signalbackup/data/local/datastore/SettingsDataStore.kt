@@ -34,6 +34,7 @@ package com.johnsonyuen.signalbackup.data.local.datastore
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
@@ -57,9 +58,10 @@ class SettingsDataStore(
 
     // ---- Keys ----
     // Each key corresponds to one setting stored in the DataStore file.
-    // Using a private object keeps these keys encapsulated and prevents external access.
+    // Using an internal object keeps these keys encapsulated within the module while
+    // allowing other module classes (e.g. UploadAlarmReceiver) to reference them directly.
 
-    private object Keys {
+    internal object Keys {
         /** SAF (Storage Access Framework) tree URI for the local backup folder. */
         val LOCAL_FOLDER_URI = stringPreferencesKey("local_folder_uri")
 
@@ -80,6 +82,9 @@ class SettingsDataStore(
 
         /** Theme mode string ("SYSTEM", "LIGHT", or "DARK") for user appearance preference. */
         val THEME_MODE = stringPreferencesKey("theme_mode")
+
+        /** Whether uploads should only occur on Wi-Fi (unmetered) networks. */
+        val WIFI_ONLY = booleanPreferencesKey("wifi_only")
 
         // ---- Resumable upload session keys ----
         // These keys persist the state of an in-progress resumable upload so it can
@@ -154,6 +159,10 @@ class SettingsDataStore(
     /** The theme mode preference string ("SYSTEM", "LIGHT", or "DARK"), defaulting to "SYSTEM". */
     val themeMode: Flow<String>
         get() = dataStore.data.map { it[Keys.THEME_MODE] ?: "SYSTEM" }
+
+    /** Whether uploads should only occur on Wi-Fi (unmetered) networks, defaulting to false. */
+    val wifiOnly: Flow<Boolean>
+        get() = dataStore.data.map { it[Keys.WIFI_ONLY] ?: false }
 
     // ---- Suspend setters ----
     // Each setter is a suspend function because DataStore writes are asynchronous I/O operations.
@@ -256,6 +265,14 @@ class SettingsDataStore(
      */
     suspend fun setThemeMode(mode: String) {
         dataStore.edit { prefs -> prefs[Keys.THEME_MODE] = mode }
+    }
+
+    /**
+     * Sets the Wi-Fi only upload preference.
+     * @param enabled True to restrict uploads to Wi-Fi (unmetered) networks only.
+     */
+    suspend fun setWifiOnly(enabled: Boolean) {
+        dataStore.edit { prefs -> prefs[Keys.WIFI_ONLY] = enabled }
     }
 
     // ---- Resumable upload session persistence ----

@@ -70,6 +70,7 @@ import androidx.work.WorkerParameters
 import com.johnsonyuen.signalbackup.R
 import com.johnsonyuen.signalbackup.domain.model.UploadProgress
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
+import com.johnsonyuen.signalbackup.domain.model.WifiRequiredException
 import com.johnsonyuen.signalbackup.domain.usecase.PerformUploadUseCase
 import com.johnsonyuen.signalbackup.util.formatFileSize
 import dagger.assisted.Assisted
@@ -177,6 +178,13 @@ class UploadWorker @AssistedInject constructor(
                 // (consent requires UI interaction, and the others are intermediate states).
                 else -> Result.failure()
             }
+        } catch (e: WifiRequiredException) {
+            // The device switched from Wi-Fi to mobile data mid-upload while the user has
+            // "Wi-Fi only" enabled. Return retry so WorkManager re-enqueues the work.
+            // The resumable session is preserved in DataStore, so the upload will resume
+            // from the last confirmed byte offset when Wi-Fi is available again.
+            Log.w(TAG, "Upload paused due to Wi-Fi constraint: ${e.message}")
+            return Result.retry()
         } finally {
             _progressFlow.value = null
             // Always release both locks, even if the upload throws an exception.

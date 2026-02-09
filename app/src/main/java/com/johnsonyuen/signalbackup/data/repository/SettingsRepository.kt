@@ -60,6 +60,9 @@ interface SettingsRepository {
     /** The theme mode string ("SYSTEM", "LIGHT", or "DARK"). */
     val themeMode: Flow<String>
 
+    /** Whether uploads should only occur on Wi-Fi (unmetered) networks. */
+    val wifiOnly: Flow<Boolean>
+
     // ---- Suspend setters (async writes) ----
 
     /** Sets or clears the local backup folder URI. */
@@ -88,6 +91,9 @@ interface SettingsRepository {
 
     /** Sets the theme mode preference. */
     suspend fun setThemeMode(mode: String)
+
+    /** Sets the Wi-Fi only upload preference. */
+    suspend fun setWifiOnly(enabled: Boolean)
 
     // ---- Resumable upload session ----
 

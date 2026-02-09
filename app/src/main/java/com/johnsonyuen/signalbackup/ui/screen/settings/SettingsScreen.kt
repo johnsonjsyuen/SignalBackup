@@ -82,6 +82,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
     val currentDriveFolder by viewModel.currentDriveFolder.collectAsStateWithLifecycle()
     val currentDriveFolderName by viewModel.currentDriveFolderName.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
+    val wifiOnly by viewModel.wifiOnly.collectAsStateWithLifecycle()
     val driveError by viewModel.driveError.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
@@ -200,6 +201,21 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                         TextButton(onClick = { showTimePicker = true }) {
                             Text("Change")
                         }
+                    }
+                )
+            }
+
+            // Wi-Fi only toggle -- restricts uploads to unmetered networks.
+            Card(modifier = Modifier.fillMaxWidth()) {
+                ListItem(
+                    headlineContent = { Text("Wi-Fi only") },
+                    supportingContent = { Text("Only upload when connected to Wi-Fi") },
+                    leadingContent = { Icon(Icons.Default.Wifi, contentDescription = null) },
+                    trailingContent = {
+                        Switch(
+                            checked = wifiOnly,
+                            onCheckedChange = { viewModel.setWifiOnly(it) }
+                        )
                     }
                 )
             }

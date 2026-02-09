@@ -30,7 +30,9 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
 import com.johnsonyuen.signalbackup.worker.UploadWorker
+import kotlinx.coroutines.flow.first
 import javax.inject.Inject
 
 /**
@@ -40,9 +42,11 @@ import javax.inject.Inject
  * ([WORK_NAME]) rather than a work request ID.
  *
  * @param workManager The WorkManager instance for enqueueing work requests.
+ * @param settingsRepository Provides access to user preferences (e.g., Wi-Fi only setting).
  */
 class ManualUploadUseCase @Inject constructor(
-    private val workManager: WorkManager
+    private val workManager: WorkManager,
+    private val settingsRepository: SettingsRepository
 ) {
     /**
      * Enqueues a one-time upload work request.
@@ -54,9 +58,12 @@ class ManualUploadUseCase @Inject constructor(
      * Uses [ExistingWorkPolicy.KEEP] to prevent duplicate manual uploads --
      * if an upload is already running, the new request is ignored.
      */
-    operator fun invoke() {
+    suspend operator fun invoke() {
+        val wifiOnly = settingsRepository.wifiOnly.first()
+        val networkType = if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED
+
         val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .setRequiredNetworkType(networkType)
             .build()
 
         val request = OneTimeWorkRequestBuilder<UploadWorker>()
