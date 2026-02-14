@@ -71,7 +71,9 @@ import com.johnsonyuen.signalbackup.R
 import com.johnsonyuen.signalbackup.domain.model.UploadProgress
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
 import com.johnsonyuen.signalbackup.domain.model.WifiRequiredException
+import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
 import com.johnsonyuen.signalbackup.domain.usecase.PerformUploadUseCase
+import com.johnsonyuen.signalbackup.domain.usecase.ScheduleRetryUseCase
 import com.johnsonyuen.signalbackup.util.formatFileSize
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -97,7 +99,9 @@ import kotlinx.coroutines.flow.asStateFlow
 class UploadWorker @AssistedInject constructor(
     @Assisted appContext: Context,
     @Assisted workerParams: WorkerParameters,
-    private val performUploadUseCase: PerformUploadUseCase
+    private val performUploadUseCase: PerformUploadUseCase,
+    private val scheduleRetryUseCase: ScheduleRetryUseCase,
+    private val settingsRepository: SettingsRepository
 ) : CoroutineWorker(appContext, workerParams) {
 
     /** Tracks whether we successfully promoted to a foreground service. */
@@ -121,6 +125,9 @@ class UploadWorker @AssistedInject constructor(
      */
     override suspend fun doWork(): Result {
         val isManualUpload = inputData.getBoolean(KEY_IS_MANUAL_UPLOAD, false)
+
+        // Clear any pending retry state since we're now executing
+        settingsRepository.clearRetryScheduled()
 
         // Ensure the notification channel exists before any notification operations.
         ensureNotificationChannel()
@@ -172,7 +179,12 @@ class UploadWorker @AssistedInject constructor(
                 }
                 is UploadStatus.Failed -> {
                     // Retry up to MAX_RETRY_COUNT times with exponential backoff.
-                    if (runAttemptCount < MAX_RETRY_COUNT) Result.retry() else Result.failure()
+                    if (runAttemptCount < MAX_RETRY_COUNT) {
+                        Result.retry()
+                    } else {
+                        scheduleRetryUseCase(status.error)
+                        Result.failure()
+                    }
                 }
                 // NeedsConsent, Idle, Uploading -- these should not occur in a background worker
                 // (consent requires UI interaction, and the others are intermediate states).

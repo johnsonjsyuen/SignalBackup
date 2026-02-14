@@ -55,6 +55,7 @@ import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
 import com.johnsonyuen.signalbackup.domain.model.UploadProgress
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
 import com.johnsonyuen.signalbackup.domain.usecase.ManualUploadUseCase
+import com.johnsonyuen.signalbackup.domain.usecase.ScheduleRetryUseCase
 import com.johnsonyuen.signalbackup.receiver.UploadAlarmReceiver
 import com.johnsonyuen.signalbackup.worker.UploadWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -63,6 +64,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -78,6 +80,7 @@ import javax.inject.Inject
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     private val manualUploadUseCase: ManualUploadUseCase,
+    private val scheduleRetryUseCase: ScheduleRetryUseCase,
     private val settingsRepository: SettingsRepository,
     private val workManager: WorkManager,
     @ApplicationContext private val appContext: Context
@@ -112,6 +115,25 @@ class HomeViewModel @Inject constructor(
         // This survives Activity recreation and picks up in-progress uploads.
         observeManualUploadWork()
         observeScheduledUploadWork()
+        observeRetryUploadWork()
+
+        // Observe retry DataStore fields to show RetryScheduled status.
+        viewModelScope.launch {
+            combine(
+                settingsRepository.retryAtMillis,
+                settingsRepository.retryError
+            ) { retryAt, retryError ->
+                if (retryAt != null && retryError != null && retryAt > System.currentTimeMillis()) {
+                    UploadStatus.RetryScheduled(retryError, retryAt)
+                } else {
+                    null
+                }
+            }.collect { retryStatus ->
+                if (retryStatus != null && _uploadStatus.value !is UploadStatus.Uploading) {
+                    _uploadStatus.value = retryStatus
+                }
+            }
+        }
 
         // Explicitly collect progress from the UploadWorker's static flow.
         // Using an explicit collect (instead of stateIn) so we can log each emission
@@ -216,6 +238,21 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    private fun observeRetryUploadWork() {
+        viewModelScope.launch {
+            workManager.getWorkInfosForUniqueWorkFlow(ScheduleRetryUseCase.WORK_NAME)
+                .collect { workInfos ->
+                    val workInfo = workInfos.firstOrNull() ?: return@collect
+                    // Skip ENQUEUED/BLOCKED — retry work sits in ENQUEUED for 30 min
+                    // with an initial delay. The combine flow handles the countdown UI.
+                    // Only react when the retry actually starts running or finishes.
+                    if (workInfo.state == WorkInfo.State.ENQUEUED ||
+                        workInfo.state == WorkInfo.State.BLOCKED) return@collect
+                    _uploadStatus.value = mapWorkInfoToStatus(workInfo)
+                }
+        }
+    }
+
     /**
      * Maps a [WorkInfo] to the corresponding [UploadStatus].
      *
@@ -260,6 +297,7 @@ class HomeViewModel @Inject constructor(
     fun cancelUpload() {
         workManager.cancelUniqueWork(ManualUploadUseCase.WORK_NAME)
         workManager.cancelUniqueWork(UploadAlarmReceiver.WORK_NAME)
+        viewModelScope.launch { scheduleRetryUseCase.cancel() }
         _uploadStatus.value = UploadStatus.Idle
         Log.d(TAG, "Upload cancelled by user")
     }

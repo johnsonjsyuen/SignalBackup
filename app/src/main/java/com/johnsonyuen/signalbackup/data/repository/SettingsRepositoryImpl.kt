@@ -112,6 +112,20 @@ class SettingsRepositoryImpl @Inject constructor(
         settingsDataStore.setWifiOnly(enabled)
     }
 
+    override val retryAtMillis: Flow<Long?>
+        get() = settingsDataStore.retryAtMillis
+
+    override val retryError: Flow<String?>
+        get() = settingsDataStore.retryError
+
+    override suspend fun setRetryScheduled(retryAtMillis: Long, error: String) {
+        settingsDataStore.setRetryScheduled(retryAtMillis, error)
+    }
+
+    override suspend fun clearRetryScheduled() {
+        settingsDataStore.clearRetryScheduled()
+    }
+
     // ---- Resumable upload session delegation ----
 
     override suspend fun getResumableSession(): ResumableUploadSession? {

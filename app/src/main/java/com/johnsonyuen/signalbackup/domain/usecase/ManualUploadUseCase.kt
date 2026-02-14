@@ -46,7 +46,8 @@ import javax.inject.Inject
  */
 class ManualUploadUseCase @Inject constructor(
     private val workManager: WorkManager,
-    private val settingsRepository: SettingsRepository
+    private val settingsRepository: SettingsRepository,
+    private val scheduleRetryUseCase: ScheduleRetryUseCase
 ) {
     /**
      * Enqueues a one-time upload work request.
@@ -59,6 +60,9 @@ class ManualUploadUseCase @Inject constructor(
      * if an upload is already running, the new request is ignored.
      */
     suspend operator fun invoke() {
+        // Cancel any pending retry since user is manually triggering
+        scheduleRetryUseCase.cancel()
+
         val wifiOnly = settingsRepository.wifiOnly.first()
         val networkType = if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED
 

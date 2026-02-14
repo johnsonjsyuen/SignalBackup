@@ -36,6 +36,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.HourglassEmpty
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -43,6 +44,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -68,6 +75,7 @@ fun StatusCard(status: UploadStatus, modifier: Modifier = Modifier) {
                 is UploadStatus.Uploading -> MaterialTheme.colorScheme.secondaryContainer
                 is UploadStatus.Idle -> MaterialTheme.colorScheme.surfaceVariant
                 is UploadStatus.NeedsConsent -> MaterialTheme.colorScheme.secondaryContainer
+                is UploadStatus.RetryScheduled -> MaterialTheme.colorScheme.errorContainer
             }
         )
     ) {
@@ -129,6 +137,33 @@ fun StatusCard(status: UploadStatus, modifier: Modifier = Modifier) {
                         strokeWidth = 2.dp
                     )
                     Text("Requesting Drive permission...", style = MaterialTheme.typography.bodyLarge)
+                }
+
+                is UploadStatus.RetryScheduled -> {
+                    var remainingMs by remember { mutableLongStateOf(status.retryAtMillis - System.currentTimeMillis()) }
+
+                    LaunchedEffect(status.retryAtMillis) {
+                        while (true) {
+                            remainingMs = (status.retryAtMillis - System.currentTimeMillis()).coerceAtLeast(0)
+                            delay(1000)
+                        }
+                    }
+
+                    val minutes = (remainingMs / 60000).toInt()
+                    val seconds = ((remainingMs % 60000) / 1000).toInt()
+
+                    Icon(
+                        Icons.Default.Refresh,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    Column {
+                        Text(
+                            "Retry in ${minutes}m ${seconds}s",
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Text(status.error, style = MaterialTheme.typography.bodySmall)
+                    }
                 }
             }
         }

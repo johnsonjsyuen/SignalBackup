@@ -95,6 +95,13 @@ interface SettingsRepository {
     /** Sets the Wi-Fi only upload preference. */
     suspend fun setWifiOnly(enabled: Boolean)
 
+    // ---- Retry scheduling ----
+
+    val retryAtMillis: Flow<Long?>
+    val retryError: Flow<String?>
+    suspend fun setRetryScheduled(retryAtMillis: Long, error: String)
+    suspend fun clearRetryScheduled()
+
     // ---- Resumable upload session ----
 
     /** Reads the saved resumable upload session, or null if none exists. */

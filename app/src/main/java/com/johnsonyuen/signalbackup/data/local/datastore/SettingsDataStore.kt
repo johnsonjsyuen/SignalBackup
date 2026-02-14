@@ -113,6 +113,9 @@ class SettingsDataStore(
 
         /** The Google Drive file ID, set when upload completed but session not yet cleared. */
         val RESUME_DRIVE_FILE_ID = stringPreferencesKey("resume_drive_file_id")
+
+        val RETRY_AT_MILLIS = longPreferencesKey("retry_at_millis")
+        val RETRY_ERROR = stringPreferencesKey("retry_error")
     }
 
     // ---- Defaults ----
@@ -163,6 +166,12 @@ class SettingsDataStore(
     /** Whether uploads should only occur on Wi-Fi (unmetered) networks, defaulting to false. */
     val wifiOnly: Flow<Boolean>
         get() = dataStore.data.map { it[Keys.WIFI_ONLY] ?: false }
+
+    val retryAtMillis: Flow<Long?>
+        get() = dataStore.data.map { it[Keys.RETRY_AT_MILLIS] }
+
+    val retryError: Flow<String?>
+        get() = dataStore.data.map { it[Keys.RETRY_ERROR] }
 
     // ---- Suspend setters ----
     // Each setter is a suspend function because DataStore writes are asynchronous I/O operations.
@@ -273,6 +282,20 @@ class SettingsDataStore(
      */
     suspend fun setWifiOnly(enabled: Boolean) {
         dataStore.edit { prefs -> prefs[Keys.WIFI_ONLY] = enabled }
+    }
+
+    suspend fun setRetryScheduled(retryAtMillis: Long, error: String) {
+        dataStore.edit { prefs ->
+            prefs[Keys.RETRY_AT_MILLIS] = retryAtMillis
+            prefs[Keys.RETRY_ERROR] = error
+        }
+    }
+
+    suspend fun clearRetryScheduled() {
+        dataStore.edit { prefs ->
+            prefs.remove(Keys.RETRY_AT_MILLIS)
+            prefs.remove(Keys.RETRY_ERROR)
+        }
     }
 
     // ---- Resumable upload session persistence ----
