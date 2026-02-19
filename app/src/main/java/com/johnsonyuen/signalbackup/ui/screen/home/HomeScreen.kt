@@ -8,28 +8,28 @@
  * 4. A "Sign In with Google" button (if not signed in) or "Upload Now" button (if signed in).
  *
  * Google Sign-In flow (implemented here, not in ViewModel):
- * The sign-in flow involves launching Android Intents and receiving results, which is
- * inherently tied to the Activity/UI layer. Here is the step-by-step:
- * 1. User taps "Sign In with Google" -> requestSignIn() builds GoogleSignInOptions
- *    with email and DRIVE scope, then launches the sign-in Intent.
- * 2. signInLauncher receives the result -> extracts the email from the signed-in account.
- * 3. If successful, the email is saved to DataStore via viewModel.setGoogleAccountEmail().
- * 4. On subsequent uploads, if Google needs OAuth consent for Drive access, the upload
+ * The sign-in flow uses the Credential Manager API, which is suspend-based and does not
+ * require Activity result launchers. Here is the step-by-step:
+ * 1. User taps "Sign In with Google" -> requestSignIn() calls CredentialManager.getCredential()
+ *    with a GetSignInWithGoogleOption request, showing a bottom sheet account picker.
+ * 2. On success, the email is extracted from GoogleIdTokenCredential and saved via
+ *    viewModel.setGoogleAccountEmail().
+ * 3. On subsequent uploads, if Google needs OAuth consent for Drive access, the upload
  *    use case returns NeedsConsent with a consent Intent.
- * 5. The LaunchedEffect watching uploadStatus detects NeedsConsent and launches
+ * 4. The LaunchedEffect watching uploadStatus detects NeedsConsent and launches
  *    consentLauncher with the consent Intent.
- * 6. If consent is granted, uploadNow() is called again to retry the upload.
+ * 5. If consent is granted, uploadNow() is called again to retry the upload.
  *
  * Key Compose concepts:
  * - **collectAsStateWithLifecycle()**: Collects a Flow as Compose State in a lifecycle-aware
  *   way. Stops collection when the UI is not visible (saves resources).
  * - **hiltViewModel()**: Creates or retrieves the Hilt-injected ViewModel for this composable.
- * - **rememberLauncherForActivityResult()**: Creates a launcher for starting Activities
- *   and receiving their results (the Compose equivalent of onActivityResult).
+ * - **rememberCoroutineScope()**: Creates a coroutine scope tied to the composable's lifecycle.
+ *   Used to launch the suspend-based Credential Manager sign-in call.
  * - **LaunchedEffect(uploadStatus)**: Runs a side-effect whenever the upload status changes.
  *   Used to detect NeedsConsent and launch the consent Intent automatically.
  * - **LocalContext.current**: Accesses the current Activity context from within a composable.
- *   Needed for GoogleSignIn.getClient() which requires an Activity context.
+ *   Needed for CredentialManager which requires an Activity context.
  *
  * @see ui.screen.home.HomeViewModel for the state management
  * @see ui.component.StatusCard for the upload status display
@@ -73,17 +73,23 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.google.android.gms.auth.api.signin.GoogleSignIn
-import com.google.android.gms.auth.api.signin.GoogleSignInOptions
-import com.google.android.gms.common.api.ApiException
-import com.google.android.gms.common.api.Scope
-import com.google.api.services.drive.DriveScopes
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.credentials.CredentialManager
+import androidx.credentials.GetCredentialRequest
+import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.NoCredentialException
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import com.google.android.libraries.identity.googleid.GoogleIdTokenParsingException
+import kotlinx.coroutines.launch
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
 import com.johnsonyuen.signalbackup.ui.component.CountdownTimer
 import com.johnsonyuen.signalbackup.ui.component.StatusCard
 import com.johnsonyuen.signalbackup.ui.component.UploadProgressCard
 
 private const val TAG = "HomeScreen"
+private const val WEB_CLIENT_ID = "708439544712-sfhh5anisbh3mik9tt1l638r86c7mcvp.apps.googleusercontent.com"
 
 /**
  * The Home screen composable -- the app's primary interface.
@@ -109,10 +115,11 @@ fun HomeScreen(
     val driveFolderName by viewModel.driveFolderName.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var signInError by remember { mutableStateOf<String?>(null) }
+    val coroutineScope = rememberCoroutineScope()
 
     // -----------------------------------------------------------------------
-    // Activity result launchers for Google Sign-In and Drive consent.
-    // These are the Compose equivalents of the old onActivityResult() pattern.
+    // Activity result launcher for Drive consent.
+    // This is the Compose equivalent of the old onActivityResult() pattern.
     // -----------------------------------------------------------------------
 
     /**
@@ -144,50 +151,48 @@ fun HomeScreen(
     }
 
     /**
-     * Launcher for the Google Sign-In flow.
-     * On success, extracts the email and saves it to DataStore.
-     * On failure, shows an error message on screen.
-     */
-    val signInLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        try {
-            val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
-            val account = task.getResult(ApiException::class.java)
-            val email = account?.email
-            Log.d(TAG, "Sign-in result: email=$email, account=$account")
-            if (email != null) {
-                viewModel.setGoogleAccountEmail(email)
-                signInError = null
-            } else {
-                signInError = "Sign-in succeeded but no email returned"
-            }
-        } catch (e: ApiException) {
-            Log.e(TAG, "Sign-in failed: statusCode=${e.statusCode}, message=${e.message}", e)
-            signInError = "Sign-in failed (code ${e.statusCode})"
-        }
-    }
-
-    /**
-     * Builds GoogleSignInOptions and launches the sign-in Intent.
+     * Launches the Credential Manager sign-in flow.
      *
-     * GoogleSignInOptions.DEFAULT_SIGN_IN provides basic profile info.
-     * requestEmail() adds the email scope.
-     * requestScopes(DRIVE) requests full Drive access so the app can both
-     * upload files AND list/browse existing user folders in the folder picker.
-     * The narrower DRIVE_FILE scope only sees app-created files/folders.
-     *
-     * Note: GoogleSignIn is deprecated but still functional. The newer
-     * Credential Manager API does not yet support Drive scopes directly.
+     * Uses GetSignInWithGoogleOption to show a bottom-sheet account picker.
+     * This replaces the deprecated GoogleSignIn API. Only authentication (email)
+     * is handled here — Drive scope authorization happens just-in-time on
+     * first upload via the existing NeedsConsent → consentLauncher flow.
      */
     fun requestSignIn() {
         signInError = null
-        val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
-            .requestEmail()
-            .requestScopes(Scope(DriveScopes.DRIVE))
-            .build()
-        val client = GoogleSignIn.getClient(context, gso)
-        signInLauncher.launch(client.signInIntent)
+        coroutineScope.launch {
+            try {
+                val signInOption = GetSignInWithGoogleOption.Builder(WEB_CLIENT_ID)
+                    .build()
+                val request = GetCredentialRequest.Builder()
+                    .addCredentialOption(signInOption)
+                    .build()
+                val credentialManager = CredentialManager.create(context)
+                val result = credentialManager.getCredential(context, request)
+                val credential = result.credential
+                val idTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
+                val email = idTokenCredential.id
+                Log.d(TAG, "Sign-in result: email=$email")
+                if (email != null) {
+                    viewModel.setGoogleAccountEmail(email)
+                    signInError = null
+                } else {
+                    signInError = "Sign-in succeeded but no email returned"
+                }
+            } catch (e: NoCredentialException) {
+                Log.e(TAG, "No credentials available", e)
+                signInError = "No Google accounts found on this device"
+            } catch (e: GetCredentialCancellationException) {
+                Log.d(TAG, "Sign-in cancelled by user")
+                // User cancelled -- no error to show.
+            } catch (e: GoogleIdTokenParsingException) {
+                Log.e(TAG, "Failed to parse Google ID token", e)
+                signInError = "Sign-in failed: invalid response"
+            } catch (e: GetCredentialException) {
+                Log.e(TAG, "Sign-in failed: ${e.message}", e)
+                signInError = "Sign-in failed: ${e.message}"
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

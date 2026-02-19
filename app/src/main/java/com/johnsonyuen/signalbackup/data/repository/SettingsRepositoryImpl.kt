@@ -1,136 +1,138 @@
-/**
- * SettingsRepositoryImpl.kt - Implementation of [SettingsRepository] backed by DataStore.
- *
- * This class implements the [SettingsRepository] interface by delegating all operations
- * to [SettingsDataStore]. It serves as a thin wrapper that bridges the repository
- * interface (used by the domain/presentation layers) with the DataStore implementation.
- *
- * Why have this wrapper instead of using SettingsDataStore directly?
- * - **Testability**: ViewModels and use cases depend on the SettingsRepository interface,
- *   which can be easily mocked in unit tests without needing a real DataStore.
- * - **Flexibility**: If the storage mechanism changes (e.g., from DataStore to Room),
- *   only this implementation needs to change -- all consumers remain untouched.
- * - **Clean Architecture**: The domain layer should not know about Android-specific
- *   implementations like DataStore.
- *
- * Architecture context:
- * - Part of the **data layer** (data/repository package).
- * - Uses [@Inject] constructor for Hilt to create instances.
- * - Bound to [SettingsRepository] interface via @Binds in [RepositoryModule].
- * - Singleton scope (one instance shared across the entire app).
- *
- * @see data.repository.SettingsRepository for the interface contract
- * @see data.local.datastore.SettingsDataStore for the underlying DataStore wrapper
- * @see di.RepositoryModule for the Hilt binding
- */
 package com.johnsonyuen.signalbackup.data.repository
 
-import com.johnsonyuen.signalbackup.data.local.datastore.SettingsDataStore
+import android.util.Log
+import com.johnsonyuen.signalbackup.data.local.db.SettingsDao
+import com.johnsonyuen.signalbackup.data.local.entity.SettingsEntity
 import com.johnsonyuen.signalbackup.domain.model.ResumableUploadSession
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import javax.inject.Inject
 
-/**
- * Concrete implementation of [SettingsRepository] that delegates to [SettingsDataStore].
- *
- * The [@Inject] annotation on the constructor tells Hilt how to create this class.
- * Hilt will automatically provide the [SettingsDataStore] dependency (which it gets
- * from AppModule.provideSettingsDataStore()).
- *
- * @param settingsDataStore The DataStore wrapper to delegate all operations to.
- */
 class SettingsRepositoryImpl @Inject constructor(
-    private val settingsDataStore: SettingsDataStore,
+    private val settingsDao: SettingsDao,
 ) : SettingsRepository {
 
-    // Each property and method simply delegates to the corresponding SettingsDataStore
-    // member. This thin delegation pattern is common in clean architecture -- it may
-    // seem like boilerplate, but it provides the interface abstraction needed for
-    // testing and loose coupling.
+    private val settingsFlow: Flow<SettingsEntity> =
+        settingsDao.getSettings()
+            .onEach { Log.d(TAG, "Room emitted settings entity: $it") }
+            .map { it ?: SettingsEntity() }
 
-    override val localFolderUri: Flow<String?>
-        get() = settingsDataStore.localFolderUri
+    override val localFolderUri: Flow<String?> =
+        settingsFlow.map { it.localFolderUri }
 
-    override val driveFolderId: Flow<String?>
-        get() = settingsDataStore.driveFolderId
+    override val driveFolderId: Flow<String?> =
+        settingsFlow.map { it.driveFolderId }
 
-    override val driveFolderName: Flow<String?>
-        get() = settingsDataStore.driveFolderName
+    override val driveFolderName: Flow<String?> =
+        settingsFlow.map { it.driveFolderName }
 
-    override val scheduleHour: Flow<Int>
-        get() = settingsDataStore.scheduleHour
+    override val scheduleHour: Flow<Int> =
+        settingsFlow.map { it.scheduleHour }
 
-    override val scheduleMinute: Flow<Int>
-        get() = settingsDataStore.scheduleMinute
+    override val scheduleMinute: Flow<Int> =
+        settingsFlow.map { it.scheduleMinute }
 
-    override val googleAccountEmail: Flow<String?>
-        get() = settingsDataStore.googleAccountEmail
+    override val googleAccountEmail: Flow<String?> =
+        settingsFlow.map { it.googleAccountEmail }
 
-    override val themeMode: Flow<String>
-        get() = settingsDataStore.themeMode
+    override val themeMode: Flow<String> =
+        settingsFlow.map { it.themeMode }
 
-    override val wifiOnly: Flow<Boolean>
-        get() = settingsDataStore.wifiOnly
+    override val wifiOnly: Flow<Boolean> =
+        settingsFlow.map { it.wifiOnly }
 
     override suspend fun setLocalFolderUri(uri: String?) {
-        settingsDataStore.setLocalFolderUri(uri)
+        Log.d(TAG, "setLocalFolderUri: $uri")
+        settingsDao.updateLocalFolderUri(uri)
+        Log.d(TAG, "setLocalFolderUri done, row now: ${settingsDao.getSettingsOnce()}")
     }
 
     override suspend fun setDriveFolderId(id: String?) {
-        settingsDataStore.setDriveFolderId(id)
+        Log.d(TAG, "setDriveFolderId: $id")
+        settingsDao.updateDriveFolderId(id)
+        Log.d(TAG, "setDriveFolderId done, row now: ${settingsDao.getSettingsOnce()}")
     }
 
     override suspend fun setDriveFolderName(name: String?) {
-        settingsDataStore.setDriveFolderName(name)
+        Log.d(TAG, "setDriveFolderName: $name")
+        settingsDao.updateDriveFolderName(name)
     }
 
     override suspend fun setScheduleHour(hour: Int) {
-        settingsDataStore.setScheduleHour(hour)
+        settingsDao.updateScheduleHour(hour)
     }
 
     override suspend fun setScheduleMinute(minute: Int) {
-        settingsDataStore.setScheduleMinute(minute)
+        settingsDao.updateScheduleMinute(minute)
     }
 
     override suspend fun setScheduleTime(hour: Int, minute: Int) {
-        settingsDataStore.setScheduleTime(hour, minute)
+        settingsDao.updateScheduleTime(hour, minute)
     }
 
     override suspend fun clearAccountData() {
-        settingsDataStore.clearAccountData()
+        settingsDao.clearAccountData()
+        settingsDao.clearResumableSession()
     }
 
     override suspend fun setGoogleAccountEmail(email: String?) {
-        settingsDataStore.setGoogleAccountEmail(email)
+        Log.d(TAG, "setGoogleAccountEmail: $email")
+        settingsDao.updateGoogleAccountEmail(email)
+        Log.d(TAG, "setGoogleAccountEmail done, row now: ${settingsDao.getSettingsOnce()}")
     }
 
     override suspend fun setThemeMode(mode: String) {
-        settingsDataStore.setThemeMode(mode)
+        Log.d(TAG, "setThemeMode: $mode")
+        settingsDao.updateThemeMode(mode)
     }
 
     override suspend fun setWifiOnly(enabled: Boolean) {
-        settingsDataStore.setWifiOnly(enabled)
+        Log.d(TAG, "setWifiOnly: $enabled")
+        settingsDao.updateWifiOnly(enabled)
     }
 
-    // ---- Resumable upload session delegation ----
-
     override suspend fun getResumableSession(): ResumableUploadSession? {
-        return settingsDataStore.getResumableSession()
+        val entity = settingsDao.getSettingsOnce() ?: return null
+        val sessionUri = entity.resumeSessionUri ?: return null
+        return ResumableUploadSession(
+            sessionUri = sessionUri,
+            localFileUri = entity.resumeLocalFileUri ?: return null,
+            fileName = entity.resumeFileName ?: return null,
+            bytesUploaded = entity.resumeBytesUploaded ?: 0L,
+            totalBytes = entity.resumeTotalBytes ?: return null,
+            driveFolderId = entity.resumeDriveFolderId ?: return null,
+            createdAtMillis = entity.resumeCreatedAt ?: return null,
+            driveFileId = entity.resumeDriveFileId,
+        )
     }
 
     override suspend fun saveResumableSession(session: ResumableUploadSession) {
-        settingsDataStore.saveResumableSession(session)
+        settingsDao.saveResumableSession(
+            sessionUri = session.sessionUri,
+            localFileUri = session.localFileUri,
+            fileName = session.fileName,
+            bytesUploaded = session.bytesUploaded,
+            totalBytes = session.totalBytes,
+            driveFolderId = session.driveFolderId,
+            createdAt = session.createdAtMillis,
+            driveFileId = session.driveFileId,
+        )
     }
 
     override suspend fun updateResumableBytesUploaded(bytesUploaded: Long) {
-        settingsDataStore.updateResumableBytesUploaded(bytesUploaded)
+        settingsDao.updateResumableBytesUploaded(bytesUploaded)
     }
 
     override suspend fun updateResumableDriveFileId(driveFileId: String) {
-        settingsDataStore.updateResumableDriveFileId(driveFileId)
+        settingsDao.updateResumableDriveFileId(driveFileId)
     }
 
     override suspend fun clearResumableSession() {
-        settingsDataStore.clearResumableSession()
+        settingsDao.clearResumableSession()
+    }
+
+    companion object {
+        private const val TAG = "SettingsRepo"
     }
 }

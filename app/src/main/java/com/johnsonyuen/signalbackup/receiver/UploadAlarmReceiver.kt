@@ -7,14 +7,17 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
-import com.johnsonyuen.signalbackup.data.local.datastore.SettingsDataStore
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
-import com.johnsonyuen.signalbackup.data.local.datastore.dataStore
+import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.EntryPointAccessors
+import dagger.hilt.components.SingletonComponent
 import com.johnsonyuen.signalbackup.worker.UploadWorker
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -30,7 +33,11 @@ class UploadAlarmReceiver : BroadcastReceiver() {
         // runBlocking is acceptable here because onReceive() runs on the main thread
         // with a short time limit, and DataStore reads from disk are fast.
         val wifiOnly = runBlocking {
-            context.dataStore.data.first()[SettingsDataStore.Keys.WIFI_ONLY] ?: false
+            val entryPoint = EntryPointAccessors.fromApplication(
+                context.applicationContext,
+                UploadAlarmReceiverEntryPoint::class.java
+            )
+            entryPoint.settingsRepository().wifiOnly.first()
         }
         val networkType = if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED
 
@@ -58,6 +65,12 @@ class UploadAlarmReceiver : BroadcastReceiver() {
         } else {
             Log.w(TAG, "Missing hour/minute extras, cannot re-schedule alarm")
         }
+    }
+
+    @EntryPoint
+    @InstallIn(SingletonComponent::class)
+    interface UploadAlarmReceiverEntryPoint {
+        fun settingsRepository(): SettingsRepository
     }
 
     companion object {
