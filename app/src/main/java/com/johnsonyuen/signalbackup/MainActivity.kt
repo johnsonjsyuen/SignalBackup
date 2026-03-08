@@ -30,7 +30,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.johnsonyuen.signalbackup.data.local.datastore.SettingsDataStore
+import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
 import com.johnsonyuen.signalbackup.domain.model.ThemeMode
 import com.johnsonyuen.signalbackup.ui.navigation.AppNavGraph
 import com.johnsonyuen.signalbackup.ui.theme.SignalBackupTheme
@@ -44,21 +44,21 @@ import javax.inject.Inject
  * This is required for any Activity that needs to use `hiltViewModel()` in its Compose content,
  * because Hilt needs to set up the DI scope at the Activity level.
  *
- * The Activity injects [SettingsDataStore] directly (via field injection) to read the user's
+ * The Activity injects [SettingsRepository] directly (via field injection) to read the user's
  * theme preference at the very top level of the Compose tree, before any themed content renders.
  */
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
     /**
-     * Injected SettingsDataStore for reading the user's theme mode preference.
+     * Injected SettingsRepository for reading the user's theme mode preference.
      *
      * We use field injection here ([@Inject] on a lateinit var) because Android
      * instantiates Activities itself -- we cannot use constructor injection.
      * Hilt populates this field after the Activity is created but before onCreate runs.
      */
     @Inject
-    lateinit var settingsDataStore: SettingsDataStore
+    lateinit var settingsRepository: SettingsRepository
 
     /**
      * Called when the Activity is first created (or recreated after a configuration change).
@@ -82,7 +82,7 @@ class MainActivity : ComponentActivity() {
             // collectAsStateWithLifecycle() is lifecycle-aware: it automatically starts/stops
             // collection when the Activity enters/leaves the foreground, preventing wasted work.
             // The initial value "SYSTEM" is used until the DataStore emits its first value.
-            val themeModeString by settingsDataStore.themeMode
+            val themeModeString by settingsRepository.themeMode
                 .collectAsStateWithLifecycle(initialValue = "SYSTEM")
 
             // Convert the stored string ("SYSTEM", "LIGHT", "DARK") to a type-safe enum.

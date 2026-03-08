@@ -1,14 +1,26 @@
+/**
+ * WifiRequiredException.kt - Exception thrown when a Wi-Fi-only upload detects a metered network.
+ *
+ * This exception is thrown by [PerformUploadUseCase] during the chunked upload loop when the
+ * user has the "Wi-Fi only" setting enabled but the device has switched to a metered (mobile
+ * data) network mid-upload.
+ *
+ * [UploadWorker] catches this exception and returns [Result.retry()] so that WorkManager
+ * re-enqueues the upload with an UNMETERED network constraint. The resumable upload session
+ * is preserved in DataStore, so the upload will resume from the last confirmed byte offset
+ * when Wi-Fi becomes available again.
+ *
+ * @see domain.usecase.PerformUploadUseCase for where this is thrown
+ * @see worker.UploadWorker for where this is caught
+ */
 package com.johnsonyuen.signalbackup.domain.model
 
 /**
- * Thrown when an upload is attempted on a metered (non-Wi-Fi) network while the user
- * has enabled the "Wi-Fi only" setting.
+ * Signals that the upload was aborted because the device is on a metered network
+ * and the user requires Wi-Fi for uploads.
  *
- * This exception is caught by [UploadWorker] to gracefully pause the upload and return
- * [Result.retry()]. The resumable upload session is preserved in DataStore, so the upload
- * will resume from the last confirmed byte offset when Wi-Fi becomes available.
- *
- * @see domain.usecase.PerformUploadUseCase.checkWifiConstraint
- * @see worker.UploadWorker.doWork
+ * This is a transient, retryable condition -- not a permanent failure.
  */
-class WifiRequiredException : Exception("Wi-Fi is required but the device is on a metered network")
+class WifiRequiredException(
+    message: String = "Upload paused: Wi-Fi required but device is on a metered network"
+) : Exception(message)

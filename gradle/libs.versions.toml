@@ -10,7 +10,6 @@ navigation = "2.8.5"
 hilt = "2.53.1"
 hiltNavigationCompose = "1.2.0"
 room = "2.6.1"
-datastore = "1.1.1"
 workmanager = "2.10.0"
 hiltWork = "1.2.0"
 googleApiClient = "2.7.0"
@@ -22,6 +21,8 @@ coroutines = "1.9.0"
 material3 = "1.3.1"
 serialization = "1.7.3"
 documentfile = "1.0.1"
+credentialManager = "1.5.0"
+googleid = "1.1.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -52,9 +53,6 @@ room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "
 room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 
-# DataStore
-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
-
 # WorkManager
 work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "workmanager" }
 hilt-work = { group = "androidx.hilt", name = "hilt-work", version.ref = "hiltWork" }
@@ -67,6 +65,11 @@ google-auth-library-oauth2-http = { group = "com.google.auth", name = "google-au
 
 # Google Sign-In
 play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
+
+# Credential Manager
+androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentialManager" }
+androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentialManager" }
+google-identity-googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
 
 # Jackson (for google-api-client)
 jackson-core = { group = "com.fasterxml.jackson.core", name = "jackson-core", version.ref = "jacksonCore" }

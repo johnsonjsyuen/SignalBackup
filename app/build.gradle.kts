@@ -192,12 +192,6 @@ dependencies {
     ksp(libs.room.compiler)
 
     // ---------------------------------------------------------------------------
-    // DataStore (Preferences Storage)
-    // ---------------------------------------------------------------------------
-    // Preferences DataStore -- type-safe key-value storage replacing SharedPreferences.
-    implementation(libs.datastore.preferences)
-
-    // ---------------------------------------------------------------------------
     // WorkManager (Background Task Scheduling)
     // ---------------------------------------------------------------------------
     // WorkManager KTX -- CoroutineWorker, OneTimeWorkRequest, PeriodicWorkRequest.
@@ -221,6 +215,16 @@ dependencies {
     // Play Services Auth -- GoogleSignIn, GoogleSignInOptions, GoogleSignInClient.
     // Note: GoogleSignIn is deprecated but still functional for Drive scope requests.
     implementation(libs.play.services.auth)
+
+    // ---------------------------------------------------------------------------
+    // Credential Manager (Google Sign-In replacement)
+    // ---------------------------------------------------------------------------
+    // Credential Manager core -- CredentialManager, GetCredentialRequest.
+    implementation(libs.androidx.credentials)
+    // Credential Manager Play Services integration -- needed for Google ID tokens.
+    implementation(libs.androidx.credentials.play.services)
+    // Google Identity library -- GetSignInWithGoogleOption, GoogleIdTokenCredential.
+    implementation(libs.google.identity.googleid)
 
     // ---------------------------------------------------------------------------
     // Jackson (JSON Parsing)

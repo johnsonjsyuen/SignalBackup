@@ -10,7 +10,7 @@
  * - Used exclusively by [DriveRepositoryImpl], which wraps it behind the [DriveRepository]
  *   interface for clean architecture separation.
  * - Depends on [GoogleAccountCredential] (provided by Hilt via DriveModule) for OAuth2
- *   authentication, and [SettingsDataStore] to read the signed-in account email.
+ *   authentication, and [SettingsRepository] to read the signed-in account email.
  *
  * Authentication pattern:
  * - Before every API call, [ensureAccount] reads the stored email from DataStore and sets
@@ -41,7 +41,7 @@ import com.google.api.client.http.javanet.NetHttpTransport
 import com.google.api.client.http.json.JsonHttpContent
 import com.google.api.client.json.gson.GsonFactory
 import com.google.api.services.drive.Drive
-import com.johnsonyuen.signalbackup.data.local.datastore.SettingsDataStore
+import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
 import com.johnsonyuen.signalbackup.domain.model.DriveFolder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -53,17 +53,17 @@ import javax.inject.Inject
 /**
  * Service class that wraps the Google Drive API v3 client.
  *
- * Injected by Hilt with a [GoogleAccountCredential] for OAuth2 and [SettingsDataStore]
+ * Injected by Hilt with a [GoogleAccountCredential] for OAuth2 and [SettingsRepository]
  * for reading the signed-in account. All methods are suspend functions that run on
  * [Dispatchers.IO] to avoid blocking the main thread.
  *
  * @param credential Google OAuth2 credential object. Its `selectedAccountName` is set
  *        dynamically before each API call via [ensureAccount].
- * @param settingsDataStore Used to read the stored Google account email.
+ * @param settingsRepository Used to read the stored Google account email.
  */
 class GoogleDriveService @Inject constructor(
     private val credential: GoogleAccountCredential,
-    private val settingsDataStore: SettingsDataStore,
+    private val settingsRepository: SettingsRepository,
 ) {
 
     /**
@@ -111,7 +111,7 @@ class GoogleDriveService @Inject constructor(
      * @throws IllegalStateException if no Google account email is stored (user not signed in).
      */
     private suspend fun ensureAccount() {
-        val email = settingsDataStore.googleAccountEmail.first()
+        val email = settingsRepository.googleAccountEmail.first()
             ?: throw IllegalStateException("No Google account configured. Please sign in first.")
         credential.selectedAccountName = email
     }
