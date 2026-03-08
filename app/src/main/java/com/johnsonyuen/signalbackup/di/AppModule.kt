@@ -31,6 +31,8 @@ object AppModule {
             googleAccountEmail TEXT,
             themeMode TEXT NOT NULL DEFAULT 'SYSTEM',
             wifiOnly INTEGER NOT NULL DEFAULT 0,
+            retryAtMillis INTEGER,
+            retryError TEXT,
             resumeSessionUri TEXT,
             resumeLocalFileUri TEXT,
             resumeFileName TEXT,
@@ -58,11 +60,18 @@ object AppModule {
         }
     }
 
+    private val MIGRATION_3_4 = object : Migration(3, 4) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE app_settings ADD COLUMN retryAtMillis INTEGER")
+            db.execSQL("ALTER TABLE app_settings ADD COLUMN retryError TEXT")
+        }
+    }
+
     @Provides
     @Singleton
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "signal_backup_db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
             .addCallback(object : androidx.room.RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
                     super.onOpen(db)

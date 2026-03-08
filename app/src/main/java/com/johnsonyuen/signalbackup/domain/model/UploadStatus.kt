@@ -62,4 +62,6 @@ sealed interface UploadStatus {
      * @property consentIntent An Android Intent that launches Google's OAuth consent screen.
      */
     data class NeedsConsent(val consentIntent: Intent) : UploadStatus
+
+    data class RetryScheduled(val error: String, val retryAtMillis: Long) : UploadStatus
 }

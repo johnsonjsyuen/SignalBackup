@@ -54,7 +54,10 @@ import androidx.work.WorkManager
 import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
 import com.johnsonyuen.signalbackup.domain.model.UploadProgress
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
+import com.johnsonyuen.signalbackup.domain.model.GcUiState
+import com.johnsonyuen.signalbackup.domain.usecase.GarbageCollectUseCase
 import com.johnsonyuen.signalbackup.domain.usecase.ManualUploadUseCase
+import com.johnsonyuen.signalbackup.domain.usecase.ScheduleRetryUseCase
 import com.johnsonyuen.signalbackup.receiver.UploadAlarmReceiver
 import com.johnsonyuen.signalbackup.worker.UploadWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -63,8 +66,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import com.google.api.client.googleapis.extensions.android.gms.auth.UserRecoverableAuthIOException
 import javax.inject.Inject
 
 /**
@@ -78,6 +83,8 @@ import javax.inject.Inject
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     private val manualUploadUseCase: ManualUploadUseCase,
+    private val scheduleRetryUseCase: ScheduleRetryUseCase,
+    private val garbageCollectUseCase: GarbageCollectUseCase,
     private val settingsRepository: SettingsRepository,
     private val workManager: WorkManager,
     @ApplicationContext private val appContext: Context
@@ -107,11 +114,37 @@ class HomeViewModel @Inject constructor(
     private val _uploadProgress = MutableStateFlow<UploadProgress?>(null)
     val uploadProgress: StateFlow<UploadProgress?> = _uploadProgress.asStateFlow()
 
+    // -----------------------------------------------------------------------
+    // Garbage collection state -- tracks scanning, confirming, and deleting.
+    // -----------------------------------------------------------------------
+
+    private val _gcState = MutableStateFlow<GcUiState>(GcUiState.Idle)
+    val gcState: StateFlow<GcUiState> = _gcState.asStateFlow()
+
     init {
         // Observe the manual upload work status and map it to our UploadStatus.
         // This survives Activity recreation and picks up in-progress uploads.
         observeManualUploadWork()
         observeScheduledUploadWork()
+        observeRetryUploadWork()
+
+        // Observe retry DataStore fields to show RetryScheduled status.
+        viewModelScope.launch {
+            combine(
+                settingsRepository.retryAtMillis,
+                settingsRepository.retryError
+            ) { retryAt, retryError ->
+                if (retryAt != null && retryError != null && retryAt > System.currentTimeMillis()) {
+                    UploadStatus.RetryScheduled(retryError, retryAt)
+                } else {
+                    null
+                }
+            }.collect { retryStatus ->
+                if (retryStatus != null && _uploadStatus.value !is UploadStatus.Uploading) {
+                    _uploadStatus.value = retryStatus
+                }
+            }
+        }
 
         // Explicitly collect progress from the UploadWorker's static flow.
         // Using an explicit collect (instead of stateIn) so we can log each emission
@@ -216,6 +249,21 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    private fun observeRetryUploadWork() {
+        viewModelScope.launch {
+            workManager.getWorkInfosForUniqueWorkFlow(ScheduleRetryUseCase.WORK_NAME)
+                .collect { workInfos ->
+                    val workInfo = workInfos.firstOrNull() ?: return@collect
+                    // Skip ENQUEUED/BLOCKED — retry work sits in ENQUEUED for 30 min
+                    // with an initial delay. The combine flow handles the countdown UI.
+                    // Only react when the retry actually starts running or finishes.
+                    if (workInfo.state == WorkInfo.State.ENQUEUED ||
+                        workInfo.state == WorkInfo.State.BLOCKED) return@collect
+                    _uploadStatus.value = mapWorkInfoToStatus(workInfo)
+                }
+        }
+    }
+
     /**
      * Maps a [WorkInfo] to the corresponding [UploadStatus].
      *
@@ -260,6 +308,7 @@ class HomeViewModel @Inject constructor(
     fun cancelUpload() {
         workManager.cancelUniqueWork(ManualUploadUseCase.WORK_NAME)
         workManager.cancelUniqueWork(UploadAlarmReceiver.WORK_NAME)
+        viewModelScope.launch { scheduleRetryUseCase.cancel() }
         _uploadStatus.value = UploadStatus.Idle
         Log.d(TAG, "Upload cancelled by user")
     }
@@ -280,6 +329,76 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             settingsRepository.setGoogleAccountEmail(email)
         }
+    }
+
+    /**
+     * Scans the configured Drive folder for old backup files.
+     *
+     * Queries the Drive API for all files in the folder, identifies the latest
+     * backup, and sets the GC state to [GcUiState.Confirm] with the files to delete.
+     * If only 0 or 1 files exist, sets [GcUiState.NothingToDelete].
+     */
+    fun startGarbageCollect() {
+        _gcState.value = GcUiState.Scanning
+        viewModelScope.launch {
+            try {
+                val result = garbageCollectUseCase.scanOldBackups()
+                if (result == null) {
+                    _gcState.value = GcUiState.NothingToDelete
+                } else {
+                    _gcState.value = GcUiState.Confirm(
+                        latestFile = result.latestFile,
+                        filesToDelete = result.oldFiles,
+                    )
+                }
+            } catch (e: UserRecoverableAuthIOException) {
+                Log.w(TAG, "GC scan needs consent", e)
+                _gcState.value = GcUiState.Idle
+                _uploadStatus.value = UploadStatus.NeedsConsent(e.intent)
+            } catch (e: Exception) {
+                Log.e(TAG, "GC scan failed", e)
+                _gcState.value = GcUiState.Error(e.message ?: "Failed to scan Drive folder")
+            }
+        }
+    }
+
+    /**
+     * Confirms deletion of old backups after user approval.
+     *
+     * Deletes all files in the current [GcUiState.Confirm] state and transitions
+     * to [GcUiState.Done] with the count and total freed bytes.
+     */
+    fun confirmGarbageCollect() {
+        val currentState = _gcState.value
+        if (currentState !is GcUiState.Confirm) return
+
+        val filesToDelete = currentState.filesToDelete
+        val freedBytes = filesToDelete.sumOf { it.sizeBytes }
+
+        _gcState.value = GcUiState.Deleting
+        viewModelScope.launch {
+            try {
+                garbageCollectUseCase.deleteFiles(filesToDelete.map { it.id })
+                _gcState.value = GcUiState.Done(
+                    deletedCount = filesToDelete.size,
+                    freedBytes = freedBytes,
+                )
+            } catch (e: UserRecoverableAuthIOException) {
+                Log.w(TAG, "GC delete needs consent", e)
+                _gcState.value = GcUiState.Idle
+                _uploadStatus.value = UploadStatus.NeedsConsent(e.intent)
+            } catch (e: Exception) {
+                Log.e(TAG, "GC delete failed", e)
+                _gcState.value = GcUiState.Error(e.message ?: "Failed to delete files")
+            }
+        }
+    }
+
+    /**
+     * Dismisses the current GC dialog/state, returning to idle.
+     */
+    fun dismissGarbageCollect() {
+        _gcState.value = GcUiState.Idle
     }
 
     companion object {

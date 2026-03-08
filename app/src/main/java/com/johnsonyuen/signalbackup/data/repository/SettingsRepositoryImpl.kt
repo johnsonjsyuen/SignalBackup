@@ -92,6 +92,21 @@ class SettingsRepositoryImpl @Inject constructor(
         settingsDao.updateWifiOnly(enabled)
     }
 
+    override val retryAtMillis: Flow<Long?> =
+        settingsFlow.map { it.retryAtMillis }
+
+    override val retryError: Flow<String?> =
+        settingsFlow.map { it.retryError }
+
+    override suspend fun setRetryScheduled(retryAtMillis: Long, error: String) {
+        settingsDao.updateRetryScheduled(retryAtMillis, error)
+    }
+
+    override suspend fun clearRetryScheduled() {
+        settingsDao.clearRetryScheduled()
+    }
+
+
     override suspend fun getResumableSession(): ResumableUploadSession? {
         val entity = settingsDao.getSettingsOnce() ?: return null
         val sessionUri = entity.resumeSessionUri ?: return null

@@ -48,6 +48,12 @@ interface SettingsDao {
     @Query("UPDATE app_settings SET wifiOnly = :enabled WHERE id = 1")
     suspend fun updateWifiOnly(enabled: Boolean)
 
+    @Query("UPDATE app_settings SET retryAtMillis = :retryAtMillis, retryError = :error WHERE id = 1")
+    suspend fun updateRetryScheduled(retryAtMillis: Long, error: String)
+
+    @Query("UPDATE app_settings SET retryAtMillis = NULL, retryError = NULL WHERE id = 1")
+    suspend fun clearRetryScheduled()
+
     @Query(
         """UPDATE app_settings SET
             resumeSessionUri = :sessionUri,

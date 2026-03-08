@@ -17,6 +17,10 @@ data class SettingsEntity(
     val themeMode: String = "SYSTEM",
     val wifiOnly: Boolean = false,
 
+    // Retry scheduling
+    val retryAtMillis: Long? = null,
+    val retryError: String? = null,
+
     // Resumable upload session
     val resumeSessionUri: String? = null,
     val resumeLocalFileUri: String? = null,

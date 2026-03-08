@@ -76,4 +76,14 @@ class DriveRepositoryImpl @Inject constructor(
         return driveService.findFileByName(folderId, fileName)
     }
 
+    /** Delegates file listing to [GoogleDriveService.listFiles]. */
+    override suspend fun listFiles(folderId: String): List<GoogleDriveService.DriveFileInfo> {
+        return driveService.listFiles(folderId)
+    }
+
+    /** Delegates file deletion to [GoogleDriveService.deleteFile]. */
+    override suspend fun deleteFile(fileId: String) {
+        driveService.deleteFile(fileId)
+    }
+
 }
