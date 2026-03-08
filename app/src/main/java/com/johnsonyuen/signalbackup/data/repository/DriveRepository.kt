@@ -114,4 +114,19 @@ interface DriveRepository {
         fileName: String,
     ): GoogleDriveService.DriveFileInfo?
 
+    /**
+     * Lists all non-folder files in a Drive folder, sorted newest-first.
+     *
+     * @param folderId The Drive folder ID to list files in.
+     * @return A list of [GoogleDriveService.DriveFileInfo] objects sorted by creation time desc.
+     */
+    suspend fun listFiles(folderId: String): List<GoogleDriveService.DriveFileInfo>
+
+    /**
+     * Deletes a file from Google Drive.
+     *
+     * @param fileId The Google Drive file ID to delete.
+     */
+    suspend fun deleteFile(fileId: String)
+
 }

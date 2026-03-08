@@ -53,6 +53,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material3.AssistChip
@@ -78,8 +79,10 @@ import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.Scope
 import com.google.api.services.drive.DriveScopes
+import com.johnsonyuen.signalbackup.domain.model.GcUiState
 import com.johnsonyuen.signalbackup.domain.model.UploadStatus
 import com.johnsonyuen.signalbackup.ui.component.CountdownTimer
+import com.johnsonyuen.signalbackup.ui.component.GarbageCollectDialog
 import com.johnsonyuen.signalbackup.ui.component.StatusCard
 import com.johnsonyuen.signalbackup.ui.component.UploadProgressCard
 
@@ -107,6 +110,7 @@ fun HomeScreen(
     val scheduleMinute by viewModel.scheduleMinute.collectAsStateWithLifecycle()
     val localFolderUri by viewModel.localFolderUri.collectAsStateWithLifecycle()
     val driveFolderName by viewModel.driveFolderName.collectAsStateWithLifecycle()
+    val gcState by viewModel.gcState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var signInError by remember { mutableStateOf<String?>(null) }
 
@@ -189,6 +193,16 @@ fun HomeScreen(
         val client = GoogleSignIn.getClient(context, gso)
         signInLauncher.launch(client.signInIntent)
     }
+
+    // -----------------------------------------------------------------------
+    // Garbage collection dialog -- rendered outside the Column layout.
+    // Shown in all non-Idle GC states (scanning, confirm, deleting, done, error).
+    // -----------------------------------------------------------------------
+    GarbageCollectDialog(
+        state = gcState,
+        onConfirm = { viewModel.confirmGarbageCollect() },
+        onDismiss = { viewModel.dismissGarbageCollect() },
+    )
 
     // -----------------------------------------------------------------------
     // UI Layout
@@ -293,6 +307,25 @@ fun HomeScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Cancel Upload")
+                }
+            }
+
+            // "Clean Up Old Backups" button -- scans Drive folder and offers to
+            // delete all but the latest backup. Disabled while uploading.
+            if (uploadStatus !is UploadStatus.Uploading) {
+                OutlinedButton(
+                    onClick = { viewModel.startGarbageCollect() },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = gcState is GcUiState.Idle || gcState is GcUiState.Done
+                        || gcState is GcUiState.NothingToDelete || gcState is GcUiState.Error
+                ) {
+                    Icon(
+                        Icons.Default.DeleteSweep,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Clean Up Old Backups")
                 }
             }
         } else {

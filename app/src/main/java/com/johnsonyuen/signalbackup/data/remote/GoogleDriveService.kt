@@ -431,7 +431,7 @@ class GoogleDriveService @Inject constructor(
         val result = drive.files().list()
             .setQ(query)
             .setSpaces("drive")
-            .setFields("files(id, size)")
+            .setFields("files(id, name, size)")
             .setOrderBy("createdTime desc")
             .setPageSize(1)
             .execute()
@@ -440,7 +440,60 @@ class GoogleDriveService @Inject constructor(
         DriveFileInfo(
             id = file.id,
             sizeBytes = file.getSize()?.toLong(),
+            name = file.name ?: "",
         )
+    }
+
+    /**
+     * Lists all non-folder files within a specific Drive folder.
+     *
+     * Used by the garbage collection feature to enumerate all backups in the
+     * configured Drive folder. Returns files sorted newest-first by creation time.
+     *
+     * @param folderId The Google Drive folder ID to list files in.
+     * @return A list of [DriveFileInfo] objects sorted by creation time (newest first).
+     */
+    suspend fun listFiles(folderId: String): List<DriveFileInfo> = withContext(Dispatchers.IO) {
+        ensureAccount()
+
+        val query = "'$folderId' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'"
+        val allFiles = mutableListOf<DriveFileInfo>()
+        var pageToken: String? = null
+
+        do {
+            val request = drive.files().list()
+                .setQ(query)
+                .setSpaces("drive")
+                .setFields("nextPageToken, files(id, name, size)")
+                .setOrderBy("createdTime desc")
+                .setPageSize(1000)
+            if (pageToken != null) {
+                request.pageToken = pageToken
+            }
+            val result = request.execute()
+            result.files?.mapTo(allFiles) {
+                DriveFileInfo(
+                    id = it.id,
+                    sizeBytes = it.getSize()?.toLong(),
+                    name = it.name ?: "",
+                )
+            }
+            pageToken = result.nextPageToken
+        } while (pageToken != null)
+
+        allFiles
+    }
+
+    /**
+     * Deletes a file from Google Drive permanently.
+     *
+     * Used by the garbage collection feature to remove old backup files.
+     *
+     * @param fileId The Google Drive file ID to delete.
+     */
+    suspend fun deleteFile(fileId: String): Unit = withContext(Dispatchers.IO) {
+        ensureAccount()
+        drive.files().delete(fileId).execute()
     }
 
     /**
@@ -449,6 +502,7 @@ class GoogleDriveService @Inject constructor(
     data class DriveFileInfo(
         val id: String,
         val sizeBytes: Long?,
+        val name: String = "",
     )
 
     /**
