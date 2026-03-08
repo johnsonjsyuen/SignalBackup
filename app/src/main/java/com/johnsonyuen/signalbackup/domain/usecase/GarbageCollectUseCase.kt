@@ -44,13 +44,15 @@ class GarbageCollectUseCase @Inject constructor(
         val folderId = settingsRepository.driveFolderId.first()
             ?: throw IllegalStateException("No Drive folder configured")
 
-        val files = driveRepository.listFiles(folderId).map {
-            DriveFile(
-                id = it.id,
-                name = it.name,
-                sizeBytes = it.sizeBytes ?: 0L,
-            )
-        }
+        val files = driveRepository.listFiles(folderId)
+            .filter { it.name.startsWith("signal-") && it.name.endsWith(".backup") }
+            .map {
+                DriveFile(
+                    id = it.id,
+                    name = it.name,
+                    sizeBytes = it.sizeBytes ?: 0L,
+                )
+            }
 
         if (files.size <= 1) return null
 
