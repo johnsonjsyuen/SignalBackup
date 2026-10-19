@@ -1,588 +1,246 @@
-# Signal Backup - Implementation Guide
+# Implementation Guide: the upload pipeline
 
-A comprehensive guide to understanding how this Android app is built, from architecture to individual implementation details.
+This document walks through how one backup run works, from WorkManager down to individual HTTP
+requests. Paths are relative to `app/src/main/java/com/johnsonyuen/signalbackup/`. For setup and the
+feature overview see `README.md`; for agent rules and the package map see `CLAUDE.md`.
 
-## Table of Contents
+## 1. Scheduling (`work/`, `worker/`)
 
-1. [Project Overview](#1-project-overview)
-2. [Tech Stack](#2-tech-stack)
-3. [Architecture Deep Dive](#3-architecture-deep-dive)
-4. [Key Flows](#4-key-flows)
-5. [Android Concepts Explained](#5-android-concepts-explained)
-6. [How to Extend](#6-how-to-extend)
-7. [Common Pitfalls](#7-common-pitfalls)
-8. [Build and Run](#8-build-and-run)
+`UploadSchedulerImpl` owns all upload work:
 
----
+- **Daily run:** unique periodic work `signal_backup_daily`, 24 h interval with a 2 h flex window.
+  Constraints are network (`UNMETERED` when "Wi-Fi only" is on, otherwise `CONNECTED`) and battery
+  not low. The first run is placed at the chosen wall-clock time with `DailySchedule.nextRun`
+  (`ZonedDateTime`, DST-aware), using both `setInitialDelay` and `setNextScheduleTimeOverride` so the
+  flex window can't push it later. The work is tagged `schedule:HH:MM@<zone>`.
+- **`applySchedule()`** runs on app start (`SignalBackupApp.onCreate`) and whenever schedule, Wi-Fi or
+  setup state changes. It cancels the old work names from previous app versions, cancels the periodic
+  work if scheduling is off or setup is incomplete, keeps the current timing with policy `UPDATE` when
+  the tag (time + zone) is unchanged, and re-enqueues pinned to the new time otherwise, without
+  interrupting a run that is in progress.
+- **After every scheduled run** the worker calls `onScheduledRunFinished()`, which re-pins the next
+  run to the chosen time so it doesn't drift by the flex window.
+- **Manual run:** unique one-time work `signal_backup_manual`, expedited
+  (`RUN_AS_NON_EXPEDITED_WORK_REQUEST` when out of quota), policy `KEEP`, so tapping twice is a no-op.
+- Both use **exponential backoff starting at 15 min**.
 
-## 1. Project Overview
+`UploadWorker.doWork()`:
 
-**Signal Backup** is an Android application that automatically backs up Signal Messenger's encrypted backup files to Google Drive. It:
+1. Promotes itself to a `dataSync` foreground service with a progress notification. If that fails on
+   a manual run it returns `retry()`; a scheduled run continues in the background.
+2. Takes a Wi-Fi lock (high-perf) and a partial wake lock (4 h cap), released in `finally`.
+3. Calls `PerformUploadUseCase` with a progress listener. Progress goes to `UploadProgressTracker`
+   for the UI, and to the notification at most once a second.
+4. Maps the result:
 
-- Lets users pick a local folder containing Signal `.backup` files.
-- Lets users sign in with Google and select a Drive destination folder.
-- Uploads the latest backup file to Google Drive on demand or on a daily schedule.
-- Keeps a history of all upload attempts (success/failure) in a local database.
-- Supports light, dark, and system-default themes.
+| `UploadResult` | Worker result | Side effects |
+|---|---|---|
+| `Success` | success | clear problem notifications |
+| `NoNewBackup` | success | "stale" notification |
+| `NeedsConsent` | failure | consent notification (+ stale warning if last success > 36 h) |
+| `WaitingForWifi` | retry | — |
+| `Failed`, retryable, attempts < 5 | retry | — |
+| `Failed`, otherwise | failure | failure notification with a fix action (+ stale warning if last success > 36 h) |
+| `AlreadyRunning` | success | — |
 
-### App Package
+Scheduled runs call `onScheduledRunFinished()` on every terminal outcome. On Android 15+ the dataSync
+foreground time limit can stop the worker; the stop reason is logged and the next attempt resumes the
+persisted session.
 
-```
-com.johnsonyuen.signalbackup
-```
+## 2. One run (`domain/usecase/PerformUploadUseCase.kt`)
 
-### Minimum SDK
+`PerformUploadUseCase` is a `@Singleton` with a **process-wide `Mutex`** in its companion object.
+`tryLock()` failing returns `AlreadyRunning` immediately, with no history row. Otherwise:
 
-- **minSdk 26** (Android 8.0 Oreo) -- provides `java.time` APIs, notification channels, and SAF improvements.
-- **targetSdk / compileSdk 35** (Android 15).
+1. Read settings. If there's no account → `Failed(NOT_SIGNED_IN)`; no local folder → `Failed(LOCAL_FOLDER_NOT_SET)`.
+2. `NetworkPolicy.ensureUploadAllowed()`: with Wi-Fi only on, a metered or missing network throws
+   `WifiRequiredException` → `WaitingForWifi`.
+3. `ResolveDriveFolderUseCase` (section 6).
+4. `BackupFolderScanner.scan()` (section 3). No backup item → `Failed(NO_BACKUP_FOUND)`.
+5. `MirrorSyncer.sync()` (section 4).
+6. Staleness (section 5) → `NoNewBackup`, else `Success(newestName, bytesUploaded, filesUploaded)`.
 
----
+Exceptions are mapped by `mapFailure()` to a `FailureReason` and a short message that is safe to show
+the user (quota exceeded, Drive 404, retryable 5xx/429, checksum mismatch, local read error, network, …).
+Each `FailureReason` has a `retryable` flag. Then **exactly one** `upload_history` row is written
+under `NonCancellable` (status SUCCESS / STALE / FAILED, failure reason, message, bytes uploaded,
+newest backup name and size, Drive file id and MD5 for successful legacy-file runs). Notes such as
+"Drive folder was recreated" or "N file(s) changed during upload" are appended to the message.
 
-## 2. Tech Stack
+## 3. Scanning the local folder (`domain/mirror/BackupFolderScanner.kt`)
 
-| Category | Technology | Purpose |
-|----------|-----------|---------|
-| Language | Kotlin 2.0.21 | Primary language, with coroutines for async |
-| UI | Jetpack Compose + Material3 | Declarative UI framework |
-| DI | Hilt (Dagger) 2.53.1 | Dependency injection |
-| Database | Room 2.6.1 | SQLite ORM for upload history |
-| Preferences | Preferences DataStore 1.1.1 | Type-safe key-value storage |
-| Background Work | WorkManager 2.10.0 | Scheduled periodic uploads |
-| Cloud Storage | Google Drive API v3 | File upload to Drive |
-| Authentication | Google Sign-In + Identity API | OAuth2 authentication |
-| Navigation | Navigation Compose 2.8.5 | Type-safe routing |
-| Serialization | kotlinx.serialization 1.7.3 | Route serialization for navigation |
-| Build | Gradle 8.13 + AGP 8.13.2 | Build system with version catalog |
-| Code Generation | KSP 2.0.21-1.0.28 | Compile-time annotation processing |
+- Requires a persisted read permission on the SAF tree URI; otherwise `LocalFolderInaccessibleException`.
+- Breadth-first walk, one `DocumentsContract` children query per directory (`DocumentTreeSource`).
+  A root that can't be listed → inaccessible; a subfolder that can't be listed → `LocalReadException`.
+- Skips hidden entries (leading `.`), `*.tmp`, `*.partial`, and files modified less than 2 minutes ago.
+  Every visited path, including skipped ones, goes into `presentPaths`, which Clean Up uses.
+- **Backup items** are recognised at the top level only (`BackupNames`):
+  - legacy file `signal-*.backup`
+  - snapshot folder `signal-backup-*` (only if it contains eligible files)
 
-### Version Catalog
+  Each item's time is the `YYYY-MM-DD-HH-MM-SS` in its name, read in the device zone, falling back to
+  lastModified. The newest item determines staleness and the history row.
 
-All dependency versions are centralized in `gradle/libs.versions.toml`. The app's `build.gradle.kts` references them via type-safe `libs.*` aliases (e.g., `libs.hilt.android`, `libs.room.runtime`).
+## 4. Mirroring (`domain/mirror/MirrorSyncer.kt`)
 
----
+1. Load all `synced_file` rows. List the Drive root folder's children. Any top-level record whose
+   Drive id is no longer in the root (the user deleted it on Drive) is dropped, along with everything
+   under it, so it gets mirrored again.
+2. **Directories** (parents first): reuse the recorded Drive folder id; otherwise reuse a same-named
+   child folder (preferring app-tagged ones); otherwise create a tagged folder. Then record it.
+3. **Pending files** are those with no record, or whose size or lastModified differ from the record.
+   Upload order: loose files first, then backup items oldest first; inside an item, `manifest.json`
+   goes last so a snapshot only looks complete on Drive once everything else is there.
+4. For each file:
+   - **Adopt** if the Drive parent already has a non-folder child with the same name and size whose
+     `md5Checksum` matches the local MD5. No upload is needed (this picks up older legacy uploads).
+   - Otherwise `FileUploader.upload()` (section 7).
+   - On success, upsert a `SyncedFile(relativePath, size, lastModified, driveFileId, md5, syncedAt)`.
+   - `LocalFileChangedException` (Signal is still writing) skips the file for this run and counts it
+     in `filesSkipped`. That item's `manifest.json` is then deferred too.
+   - Any other exception aborts the pass. Rows already written stay, so the next run continues where
+     this one stopped.
+5. Progress is reported as bytes across all pending files, with the current file name.
 
-## 3. Architecture Deep Dive
+## 5. Staleness (`domain/mirror/Staleness.kt`)
 
-### 3.1 Package Structure
+If the newest local backup item is more than **48 h** old, the run still mirrors everything, then
+returns `NoNewBackup` (history status STALE) and the worker posts a "Signal hasn't made a new
+backup" notification. Separately, the worker warns after a failed run when the last *successful*
+history row is more than 36 h old.
 
-```
-com.johnsonyuen.signalbackup/
-├── SignalBackupApp.kt          # Application class (Hilt entry point, WorkManager config)
-├── MainActivity.kt             # Single Activity hosting Compose UI
-├── data/
-│   ├── local/
-│   │   ├── entity/
-│   │   │   ├── UploadHistoryEntity.kt   # Room entity (database table)
-│   │   │   └── UploadHistoryMapper.kt   # Entity -> domain model mapper
-│   │   ├── db/
-│   │   │   ├── AppDatabase.kt           # Room database definition
-│   │   │   └── UploadHistoryDao.kt      # Room DAO (SQL queries)
-│   │   └── datastore/
-│   │       └── SettingsDataStore.kt     # Preferences DataStore wrapper
-│   ├── remote/
-│   │   └── GoogleDriveService.kt        # Google Drive API wrapper
-│   └── repository/
-│       ├── SettingsRepository.kt        # Interface
-│       ├── SettingsRepositoryImpl.kt    # DataStore-backed implementation
-│       ├── UploadHistoryRepository.kt   # Interface
-│       ├── UploadHistoryRepositoryImpl.kt # Room-backed implementation
-│       ├── DriveRepository.kt           # Interface
-│       └── DriveRepositoryImpl.kt       # Drive API-backed implementation
-├── domain/
-│   ├── model/
-│   │   ├── UploadStatus.kt             # Sealed interface: Idle/Uploading/Success/Failed/NeedsConsent
-│   │   ├── UploadRecord.kt             # Domain model for upload history
-│   │   ├── UploadResultStatus.kt       # Enum: SUCCESS/FAILED
-│   │   ├── DriveFolder.kt              # Data class: id + name
-│   │   └── ThemeMode.kt                # Enum: LIGHT/DARK/SYSTEM
-│   └── usecase/
-│       ├── PerformUploadUseCase.kt      # Core upload logic
-│       └── ScheduleUploadUseCase.kt     # WorkManager scheduling logic
-├── di/
-│   ├── AppModule.kt                     # Room, DataStore, WorkManager providers
-│   ├── DriveModule.kt                   # GoogleAccountCredential, AuthorizationClient
-│   └── RepositoryModule.kt             # Interface-to-impl bindings
-├── worker/
-│   └── UploadWorker.kt                 # Background upload worker
-├── ui/
-│   ├── theme/
-│   │   ├── Color.kt                     # Material3 color tokens
-│   │   ├── Type.kt                      # Material3 typography
-│   │   └── Theme.kt                     # Theme composable with dynamic colors
-│   ├── navigation/
-│   │   └── AppNavGraph.kt               # Bottom nav + NavHost
-│   ├── component/
-│   │   ├── StatusCard.kt                # Upload status display card
-│   │   ├── CountdownTimer.kt            # Next upload countdown
-│   │   ├── TimePickerDialog.kt          # Schedule time picker
-│   │   ├── DriveFolderPickerDialog.kt   # Drive folder browser
-│   │   └── HistoryItem.kt              # Upload history record card
-│   └── screen/
-│       ├── home/
-│       │   ├── HomeViewModel.kt         # Upload state + settings
-│       │   └── HomeScreen.kt            # Main screen with auth + upload
-│       ├── settings/
-│       │   ├── SettingsViewModel.kt     # Settings + folder picker state
-│       │   └── SettingsScreen.kt        # Configuration UI
-│       └── history/
-│           ├── HistoryViewModel.kt      # Upload records flow
-│           └── HistoryScreen.kt         # History list UI
-└── util/
-    └── FormatUtils.kt                   # Shared formatting functions
-```
+## 6. Drive folder and auth
 
-### 3.2 Layer Architecture
+- **Auth:** sign-in is Credential Manager (`GetSignInWithGoogleOption` with `BuildConfig.WEB_CLIENT_ID`)
+  and only stores the email. `DriveAuthorizerImpl` calls Play services `AuthorizationClient.authorize`
+  for `drive.file` on that account. In the background a needed resolution throws
+  `NeedsConsentException`; the UI (`ui/consent/DriveAuthorizationFlow`) launches the consent
+  PendingIntent. `DriveRepositoryImpl` sends `Authorization: Bearer <token>`; on a 401 it clears the
+  cached token and retries once.
+- **`ResolveDriveFolderUseCase`:** if a folder is configured and `files.get` returns it (not trashed,
+  is a folder), use it and sync its name. Otherwise create a tagged "Signal Backup" folder in My Drive,
+  save it, clear `synced_file` and the upload session, and return `Relocated`. Under `drive.file` a
+  folder the app didn't create returns 404, which is why this exists.
+- Everything created (folders, resumable and multipart uploads) carries `appProperties
+  {signalBackup: "1"}`, exposed as `DriveFileMeta.uploadedByApp`.
 
-The app follows a simplified **Clean Architecture** with three layers:
+## 7. Uploading one file (`domain/upload/FileUploader.kt`)
 
-```
-┌─────────────────────────────────────────┐
-│            UI / Presentation            │  Compose screens, ViewModels
-├─────────────────────────────────────────┤
-│               Domain                    │  Use cases, domain models
-├─────────────────────────────────────────┤
-│               Data                      │  Repositories, Room, DataStore, Drive API
-└─────────────────────────────────────────┘
-```
+`upload(file, parentId, onProgress)`:
 
-**Dependency rule**: UI depends on Domain, Domain depends on Data interfaces (not implementations). The DI layer (Hilt modules) wires everything together.
+1. `NetworkPolicy.ensureUploadAllowed()`, then `ensureUnchanged(file)`: re-stat the SAF document and
+   throw `LocalFileChangedException` if size or lastModified differ from the scan.
+2. **Files under 5 MiB:** read fully into memory (checking the exact length), compute the MD5, and send
+   one `uploadType=multipart` request, then verify. The resumable session is not used.
+3. **Larger files:** look at the persisted `upload_session` row (one at a time). It is resumed only if
+   relativePath, size, local lastModified and Drive parent all match, it is less than 6 days old
+   (unless the upload already completed), and it has fewer than 3 failed resumes. Otherwise it is
+   discarded and a fresh session started.
 
-### 3.3 Hilt Dependency Injection
+### Resumable protocol
 
-Hilt manages all object creation and lifecycle. Here's how dependencies flow:
+```mermaid
+sequenceDiagram
+    participant U as FileUploader / ChunkUploader
+    participant DB as Room upload_session
+    participant D as Drive
 
-```
-SignalBackupApp (@HiltAndroidApp)
-  └── creates Hilt's SingletonComponent
-        ├── AppModule (@Provides)
-        │     ├── Room Database + DAO
-        │     ├── DataStore<Preferences>
-        │     ├── SettingsDataStore
-        │     └── WorkManager
-        ├── DriveModule (@Provides)
-        │     ├── GoogleAccountCredential
-        │     └── AuthorizationClient
-        └── RepositoryModule (@Binds)
-              ├── SettingsRepository -> SettingsRepositoryImpl
-              ├── UploadHistoryRepository -> UploadHistoryRepositoryImpl
-              └── DriveRepository -> DriveRepositoryImpl
+    U->>D: POST /upload/drive/v3/files?uploadType=resumable<br/>X-Upload-Content-Type/Length, {name, parents, appProperties}
+    D-->>U: 200 + Location: session URI
+    U->>DB: save session (uri, relativePath, size, lastModified, parent, createdAt)
+    loop 8 MiB chunks from the confirmed offset
+        U->>D: PUT session URI, Content-Range: bytes off-end/total
+        D-->>U: 308 + Range: bytes=0-N  (confirmed = N+1)
+        U->>DB: bytesUploaded = confirmed
+    end
+    D-->>U: 200/201 file metadata
+    U->>DB: markCompleted(driveFileId, remoteMd5)
+    Note over U,D: verify size + MD5, then clear session
 ```
 
-**Key Hilt annotations**:
-- `@HiltAndroidApp` on `SignalBackupApp` -- triggers Hilt code generation.
-- `@AndroidEntryPoint` on `MainActivity` -- enables injection in the Activity.
-- `@HiltViewModel` on ViewModels -- enables `hiltViewModel()` in Compose.
-- `@HiltWorker` on `UploadWorker` -- enables injection in WorkManager workers.
-- `@Inject constructor(...)` on repositories and use cases -- constructor injection.
-- `@Provides` in modules -- manual object construction.
-- `@Binds` in modules -- interface-to-implementation mapping.
-- `@Singleton` -- one instance per app lifetime.
-
-### 3.4 Data Layer
-
-**Room Database** (`data/local/`):
-- `UploadHistoryEntity` maps to the `upload_history` table with columns: id, fileName, fileSizeBytes, status, errorMessage, timestamp.
-- `UploadHistoryDao` provides `insert()`, `getAll()` (Flow), and `getLatest()` queries.
-- `AppDatabase` is the Room database definition (version 2, single entity).
-
-**DataStore** (`data/local/datastore/`):
-- `SettingsDataStore` wraps `DataStore<Preferences>` with typed accessor properties (Flows) and setter functions for each setting: googleAccountEmail, localFolderUri, driveFolderId, driveFolderName, scheduleHour, scheduleMinute, themeMode.
-
-**Google Drive** (`data/remote/`):
-- `GoogleDriveService` wraps the Google Drive API v3. It uses `GoogleAccountCredential` for auth, reads the account email from DataStore before each call (`ensureAccount()`), and provides `uploadFile()`, `listFolders()`, and `createFolder()`.
-
-**Repositories** (`data/repository/`):
-- Each repository has an interface (used by domain/UI layers) and an implementation (in the data layer).
-- `SettingsRepository`: Reactive Flows for settings + suspend setters.
-- `UploadHistoryRepository`: Returns `Flow<List<UploadRecord>>` (domain models, not entities).
-- `DriveRepository`: Thin delegation to `GoogleDriveService`.
-
-### 3.5 Domain Layer
-
-**Models** (`domain/model/`):
-- `UploadStatus`: Sealed interface representing the current upload state machine. States: `Idle`, `Uploading`, `Success(fileName, fileSizeBytes)`, `Failed(error)`, `NeedsConsent(consentIntent)`.
-- `UploadRecord`: Domain model for historical records (id, fileName, fileSizeBytes, status, errorMessage, timestamp as `Instant`).
-- `UploadResultStatus`: Enum (`SUCCESS`, `FAILED`) for persisted results.
-- `DriveFolder`: Simple data class (`id`, `name`).
-- `ThemeMode`: Enum (`LIGHT`, `DARK`, `SYSTEM`) with `displayName` and `fromString()`.
-
-**Use Cases** (`domain/usecase/`):
-- `PerformUploadUseCase`: The core business logic. Reads settings, finds the latest `.backup` file via SAF, uploads to Drive, records the result in Room. Returns an `UploadStatus`.
-- `ScheduleUploadUseCase`: Calculates the initial delay to the next scheduled time, creates a `PeriodicWorkRequest`, and enqueues it with `WorkManager`.
-
-### 3.6 Presentation Layer
-
-**ViewModels**:
-- `HomeViewModel`: Manages upload status (MutableStateFlow), exposes settings as StateFlows, provides `uploadNow()` and `setGoogleAccountEmail()`.
-- `SettingsViewModel`: Exposes all settings as StateFlows, manages Drive folder picker state (folder stack, loading, errors), provides actions for changing settings.
-- `HistoryViewModel`: Simply exposes the upload records Flow as a StateFlow.
-
-**Screens**:
-- `HomeScreen`: Sign-in flow (GoogleSignIn), consent handling (LaunchedEffect), upload trigger, status card, countdown.
-- `SettingsScreen`: SAF folder picker, Drive folder picker dialog, time picker dialog, theme dialog, account management.
-- `HistoryScreen`: LazyColumn of HistoryItem cards.
-
-**Navigation**:
-- `AppNavGraph` sets up a Scaffold with TopAppBar + NavigationBar + NavHost.
-- Routes are `@Serializable data object` classes (type-safe, compile-time checked).
-- Tab switching preserves back-stack state with `saveState`/`restoreState`.
-
----
-
-## 4. Key Flows
-
-### 4.1 App Startup
-
-```
-1. Android creates SignalBackupApp (marked @HiltAndroidApp)
-     └── Hilt generates and creates the DI component graph
-     └── workManagerConfiguration property provides custom config with HiltWorkerFactory
-
-2. Android creates MainActivity (marked @AndroidEntryPoint)
-     └── Hilt injects SettingsDataStore
-     └── onCreate() reads themeMode from DataStore
-     └── setContent { SignalBackupTheme(themeMode) { AppNavGraph() } }
-
-3. AppNavGraph creates Scaffold + NavHost
-     └── HomeRoute is the start destination
-     └── HomeScreen is rendered via composable<HomeRoute>
-     └── hiltViewModel<HomeViewModel>() creates/retrieves the ViewModel
-```
-
-### 4.2 Google Sign-In Flow
-
-```
-1. User taps "Sign In with Google" on HomeScreen
-     └── requestSignIn() builds GoogleSignInOptions with email + DRIVE_FILE scope
-     └── Launches GoogleSignIn.getClient(context, gso).signInIntent
-
-2. Google shows account picker / sign-in UI
-
-3. signInLauncher receives ActivityResult
-     └── Extracts email from GoogleSignIn.getSignedInAccountFromIntent()
-     └── Calls viewModel.setGoogleAccountEmail(email)
-     └── SettingsRepository.setGoogleAccountEmail() writes to DataStore
-```
-
-### 4.3 Manual Upload Flow
-
-```
-1. User taps "Upload Now" on HomeScreen
-     └── viewModel.uploadNow() is called
-     └── _uploadStatus = Uploading (UI shows spinner)
-
-2. PerformUploadUseCase(context) is invoked:
-   a. Read localFolderUri from DataStore
-   b. Read driveFolderId from DataStore
-   c. Parse URI, create DocumentFile from SAF tree
-   d. List files matching *.backup, sort by lastModified, pick newest
-   e. Open InputStream via contentResolver
-   f. Call driveRepository.uploadFile(inputStream, fileName, mimeType, folderId)
-      └── GoogleDriveService.ensureAccount() reads email from DataStore
-      └── Sets GoogleAccountCredential.selectedAccountName
-      └── Creates Drive.Files.create() request with media upload
-      └── Executes the HTTP request to Drive API
-   g. On success: insert UploadHistoryEntity into Room, return UploadStatus.Success
-   h. On UserRecoverableAuthIOException: return UploadStatus.NeedsConsent(intent)
-   i. On other exception: insert failed record into Room, return UploadStatus.Failed
-
-3. _uploadStatus is updated with the result
-     └── If NeedsConsent: LaunchedEffect detects it, launches consent Intent
-     └── If consent granted: uploadNow() is called again (retry)
-
-4. UI recomposes to show the new status in StatusCard
-```
-
-### 4.4 Scheduled Upload Flow
-
-```
-1. User changes schedule time in SettingsScreen
-     └── TimePickerDialog onConfirm(hour, minute)
-     └── viewModel.setScheduleTime(hour, minute)
-
-2. SettingsViewModel:
-     └── settingsRepository.setScheduleTime(hour, minute) -- writes to DataStore
-     └── scheduleUploadUseCase() -- reschedules WorkManager
-
-3. ScheduleUploadUseCase:
-   a. Reads hour + minute from DataStore
-   b. Calculates initialDelay = Duration.between(now, nextTarget)
-   c. Creates PeriodicWorkRequestBuilder<UploadWorker>(24h, 30min flex)
-   d. Sets constraints: CONNECTED network + battery not low
-   e. Sets BackoffPolicy.EXPONENTIAL (15min base)
-   f. Enqueues with ExistingPeriodicWorkPolicy.UPDATE
-
-4. At the scheduled time, WorkManager runs UploadWorker:
-   a. setForeground(createForegroundInfo()) -- shows notification
-   b. performUploadUseCase(applicationContext) -- same upload logic
-   c. Returns Result.success() or Result.retry() (up to 3 attempts)
-```
-
-### 4.5 Drive Folder Selection Flow
-
-```
-1. User taps "Select" on the Drive Folder card in SettingsScreen
-     └── viewModel.loadDriveFolders() -- fetches root-level folders from Drive API
-     └── showDrivePicker = true
-
-2. DriveFolderPickerDialog is shown:
-     └── LazyColumn displays the folders returned by Drive API
-     └── User taps a folder -> viewModel.navigateToFolder(folder)
-         └── Pushes folder onto _folderStack
-         └── loadDriveFolders(folder.id) -- fetches children
-     └── Back arrow -> viewModel.navigateUp()
-         └── Pops from _folderStack
-         └── Reloads parent's children
-     └── "New Folder" icon -> nested AlertDialog for folder creation
-         └── viewModel.createFolder(name) -- Drive API call
-         └── Reloads current folder to show the new folder
-
-3. User taps "Select This Folder":
-     └── viewModel.setDriveFolder(folder) -- saves id + name to DataStore
-     └── showDrivePicker = false
-```
-
----
-
-## 5. Android Concepts Explained
-
-### 5.1 Jetpack Compose
-
-Compose is Android's modern declarative UI toolkit. Instead of XML layouts, you write Kotlin functions annotated with `@Composable`:
-
-```kotlin
-@Composable
-fun Greeting(name: String) {
-    Text("Hello, $name!")
-}
-```
-
-**Key concepts used in this app**:
-- **State hoisting**: UI state lives in ViewModels, passed down to composables.
-- **MutableStateFlow -> StateFlow -> collectAsStateWithLifecycle()**: Chain from ViewModel state to Compose recomposition.
-- **remember { mutableStateOf() }**: Local state that survives recompositions (used for dialog visibility, form inputs).
-- **LaunchedEffect(key)**: Runs a coroutine side-effect when the key changes (used for consent Intent launching, error snackbar).
-- **rememberLauncherForActivityResult()**: Registers an Activity result callback for the Compose lifecycle.
-
-### 5.2 Hilt Dependency Injection
-
-Hilt eliminates manual object construction. Instead of:
-```kotlin
-val dao = Room.databaseBuilder(...).build().uploadHistoryDao()
-val repo = UploadHistoryRepositoryImpl(dao)
-val viewModel = HistoryViewModel(repo)
-```
-
-You write:
-```kotlin
-@HiltViewModel
-class HistoryViewModel @Inject constructor(
-    uploadHistoryRepository: UploadHistoryRepository
-) : ViewModel()
-```
-
-Hilt resolves the entire dependency chain automatically.
-
-### 5.3 Room Database
-
-Room is an ORM over SQLite. You define:
-- **Entity** (`@Entity`): A Kotlin data class that maps to a database table.
-- **DAO** (`@Dao`): An interface with `@Query`, `@Insert`, `@Delete` methods.
-- **Database** (`@Database`): Declares entities and DAO accessors.
-
-Room generates all SQL at compile time (via KSP). Flow return types make queries reactive -- the UI automatically updates when data changes.
-
-### 5.4 WorkManager
-
-WorkManager is for **reliable background work** that must execute even if the app is closed or the device reboots. It is not for real-time work.
-
-In this app, `PeriodicWorkRequest` runs the upload every 24 hours:
-```
-PeriodicWorkRequestBuilder<UploadWorker>(24, HOURS, 30, MINUTES)
-```
-
-The 30-minute flex window means WorkManager can execute anytime in the last 30 minutes of the 24-hour period, optimizing for battery.
-
-**Constraints** ensure the upload only runs when conditions are met (network available, battery not low).
-
-### 5.5 Google Drive API Authentication
-
-The auth flow has multiple components:
-
-1. **GoogleSignIn**: Shows the account picker, returns a signed-in account with an email.
-2. **GoogleAccountCredential**: A credential object that uses the Android account system to obtain OAuth2 tokens. Set `selectedAccountName` before each API call.
-3. **UserRecoverableAuthIOException**: Thrown when the OAuth token is expired or a new scope hasn't been granted. Contains an Intent to show the consent dialog.
-4. **AuthorizationClient**: Part of the newer Identity API, used for requesting authorization.
-
-### 5.6 Storage Access Framework (SAF)
-
-SAF lets users grant apps access to specific directories without broad storage permissions:
-
-1. `ActivityResultContracts.OpenDocumentTree()` launches the system folder picker.
-2. Returns a `content://` URI representing the selected directory.
-3. `takePersistableUriPermission()` makes the URI survive app restarts.
-4. `DocumentFile.fromTreeUri()` wraps the URI for file-like operations.
-5. `.listFiles()` returns the files; `.uri` gives a URI to open an InputStream.
-
-### 5.7 DataStore vs SharedPreferences
-
-DataStore is the modern replacement for SharedPreferences:
-- **Asynchronous**: All reads are Kotlin Flows (non-blocking), all writes are suspend functions.
-- **Type-safe**: Keys are typed (`stringPreferencesKey`, `intPreferencesKey`).
-- **Coroutine-based**: Integrates naturally with Kotlin's structured concurrency.
-- **Single instance**: MUST have exactly one DataStore instance per file name.
-
-### 5.8 Navigation Compose with Type-Safe Routes
-
-Navigation Compose 2.8+ supports type-safe routing via `@Serializable` objects:
-
-```kotlin
-@Serializable data object HomeRoute
-@Serializable data object SettingsRoute
-
-// In NavHost:
-composable<HomeRoute> { HomeScreen() }
-
-// Navigating:
-navController.navigate(SettingsRoute)
-```
-
-No more string-based routes like `"home"` or `"settings/{id}"`.
-
----
-
-## 6. How to Extend
-
-### Add a New Setting
-
-1. Add a `Preferences.Key` in `SettingsDataStore.kt`.
-2. Add a Flow property and a setter function in `SettingsDataStore`.
-3. Add them to the `SettingsRepository` interface and `SettingsRepositoryImpl`.
-4. Expose as a `StateFlow` in the appropriate ViewModel.
-5. Add a UI card in `SettingsScreen.kt`.
-
-### Add a New Screen/Tab
-
-1. Create a `@Serializable data object` route in `AppNavGraph.kt`.
-2. Create the screen composable and ViewModel.
-3. Add a `BottomNavItem` entry in `AppNavGraph`.
-4. Add a `composable<YourRoute>` entry in the NavHost.
-
-### Add a New Use Case
-
-1. Create a class in `domain/usecase/` with `@Inject constructor(...)`.
-2. Inject any repositories or services you need.
-3. Define `suspend operator fun invoke(...)` as the entry point.
-4. Inject the use case into the relevant ViewModel.
-
-### Add a New Database Table
-
-1. Create a `@Entity` data class in `data/local/entity/`.
-2. Create a `@Dao` interface in `data/local/db/`.
-3. Add the entity to `@Database(entities = [...])` in `AppDatabase.kt`.
-4. Add a DAO accessor method to `AppDatabase`.
-5. Increment the database version (or use `fallbackToDestructiveMigration()` during development).
-6. Provide the DAO in `AppModule.kt`.
-
----
-
-## 7. Common Pitfalls
-
-### DataStore Singleton Requirement
-
-**Problem**: Creating multiple DataStore instances for the same file causes a runtime exception.
-
-**Solution**: The `by preferencesDataStore(name = "settings")` delegate is defined at file level in `AppModule.kt`, ensuring exactly one instance. Hilt's `@Singleton` scope ensures the same instance is injected everywhere.
-
-### GoogleAccountCredential Must Have Email Set
-
-**Problem**: Drive API calls fail with a generic error if `selectedAccountName` is not set on the credential.
-
-**Solution**: `GoogleDriveService.ensureAccount()` reads the email from DataStore before every API call. This is called at the top of `uploadFile()`, `listFolders()`, and `createFolder()`.
-
-### WorkManager + Hilt Requires Custom Initialization
-
-**Problem**: `@HiltWorker` workers need `HiltWorkerFactory`, but WorkManager's default initializer does not know about Hilt.
-
-**Solution**:
-1. Disable the default initializer in `AndroidManifest.xml` (tools:node="remove").
-2. `SignalBackupApp` implements `Configuration.Provider`.
-3. `workManagerConfiguration` returns a config with `HiltWorkerFactory`.
-
-### Foreground Service on Android 12+
-
-**Problem**: `setForeground()` throws `ForegroundServiceStartNotAllowedException` when the app is in the background on Android 12+.
-
-**Solution**: `UploadWorker.doWork()` wraps `setForeground()` in a try-catch. The worker continues running even if the foreground promotion fails.
-
-### SAF URI Permissions are Revocable
-
-**Problem**: The content URI returned by `OpenDocumentTree` expires when the app restarts unless you take a persistable permission.
-
-**Solution**: `SettingsScreen` calls `takePersistableUriPermission(uri, FLAG_GRANT_READ_URI_PERMISSION)` immediately after the user selects a folder.
-
-### ViewModels Must Not Hold Activity Context
-
-**Problem**: ViewModels outlive Activities. Holding an Activity context causes memory leaks.
-
-**Solution**: ViewModels use `@ApplicationContext` to inject the Application context, which has the same lifetime as the singleton component.
-
-### Compose Flow Collection
-
-**Problem**: Using `.collectAsState()` does not stop collection when the UI is in the background, wasting resources.
-
-**Solution**: Use `.collectAsStateWithLifecycle()` from `lifecycle-runtime-compose`, which automatically pauses collection when the Lifecycle is below STARTED.
-
----
-
-## 8. Build and Run
-
-### Prerequisites
-
-- **Android Studio** (Ladybug or newer recommended)
-- **JDK 17** (Temurin recommended; GraalCE may cause `jlink` errors)
-- **Android SDK 35** installed via SDK Manager
-- A **Google account** for testing Drive uploads
-- A **physical device or emulator** with Google Play Services
-
-### Building
-
-```bash
-# Debug build
-./gradlew assembleDebug
-
-# Release build (requires signing environment variables)
-KEYSTORE_FILE=/path/to/keystore.jks \
-KEYSTORE_PASSWORD=password \
-KEY_ALIAS=alias \
-KEY_PASSWORD=password \
-./gradlew assembleRelease
-```
-
-### Running
-
-1. Open the project in Android Studio.
-2. Select a device/emulator with Google Play Services.
-3. Click Run (or `./gradlew installDebug`).
-
-### Project Configuration
-
-- **Gradle wrapper**: 8.13
-- **Android Gradle Plugin**: 8.13.2
-- **Kotlin**: 2.0.21
-- **Java compatibility**: 17
-- **JDK note**: Set `org.gradle.java.home` in `gradle.properties` if your default JDK is not compatible. Temurin JDK 20 or 21 works well (avoid GraalCE for Android builds).
-
-### First Run Setup
-
-1. Launch the app.
-2. Tap "Sign In with Google" and authenticate.
-3. Go to Settings and select:
-   - A **local folder** containing Signal backup files (`.backup` extension).
-   - A **Google Drive folder** as the upload destination.
-   - Optionally change the daily upload **schedule time** (default: 3:00 AM).
-4. Return to Home and tap "Upload Now" to test.
-
----
-
-*This guide was generated to help understand the Signal Backup app implementation. Each source file contains detailed comments explaining the code, Android concepts, and architectural decisions.*
+**Fresh session:** `initiateResumableUpload`, save the session row, stream chunks from offset 0 while
+feeding a `StreamingMd5`. If the session expires mid-upload, one fresh restart is allowed.
+
+**Resume:**
+- If the session already has a `driveFileId` (completed but not verified, e.g. killed during
+  verification), `files.get` it and verify. If it's gone, start fresh.
+- Otherwise query with `PUT` + `Content-Range: bytes */total`:
+  - `308` → continue from the confirmed offset
+  - `200/201` → completed, verify
+  - `404/410` → expired, start fresh
+
+  Each resume failure caused by an IOException increments `failureCount`; after 3 the session is
+  abandoned.
+
+### Chunks and re-seeking (`ChunkUploader`)
+
+- Chunk size is 8 MiB (32 × 256 KiB; Drive requires multiples of 256 KiB except for the last chunk).
+- **Drive's confirmed offset is the source of truth.** A `308` may confirm fewer bytes than were sent.
+  The next chunk always starts at `confirmed` (the reader seeks there), not at `offset + length`.
+  An invalid range fails the upload. Three chunks in a row with no progress abort it.
+- **Per-chunk retry:** a network error or retryable HTTP status (5xx, 429, 408, 403 rate-limit) backs
+  off exponentially with jitter (1 s, 2 s, 4 s … capped at 60 s, up to 6 attempts), then *queries*
+  the session before resending. If Drive's offset moved, it re-seeks instead of resending. A 404/410
+  means the session expired.
+- Every confirmed offset is persisted (`updateBytesUploaded`) and reported for progress.
+- Every 4 chunks it re-checks the Wi-Fi policy and that the local file hasn't changed.
+- The Drive file id is stored as soon as Drive answers 200/201, before verification.
+- `StreamingMd5` hashes each byte once, so re-sending after a backwards re-seek is harmless. A resumed
+  upload (gap at the start) falls back to re-hashing the whole file.
+
+### Verification (`UploadVerifier`)
+
+1. Re-stat the local file. If it changed, trash the remote copy and throw `LocalFileChangedException`.
+2. Compare the remote size with the local size. If Drive hasn't reported the MD5 or size yet, re-fetch
+   up to 3 times (2 s, 4 s, 6 s apart).
+3. Compare the remote `md5Checksum` with the local MD5 (case-insensitive). If Drive never reports an
+   MD5, the file is accepted on size alone (logged).
+4. On a mismatch, trash the remote file, clear the session and throw `ChecksumMismatchException`
+   (retryable).
+5. On success, clear the session and return `VerifiedUpload(meta, md5, bytesSent)`.
+
+## 8. Clean Up (`domain/usecase/GarbageCollectUseCase.kt`)
+
+`scan()` needs a configured Drive folder and a readable local folder (otherwise `Blocked` or
+`NothingToClean`). It lists backup items at the top of the Drive folder, newest first by name
+timestamp. If the newest isn't in `synced_file` or in successful history, the result is `Blocked`.
+It keeps the newest 3 items. Candidates are:
+
+- (a) `synced_file` records whose path is no longer present locally (excluding the kept items and
+  their contents; children of a trashed folder are covered by the folder), and
+- (b) older top-level legacy `.backup` files not present locally that the app uploaded (tag,
+  successful history, or `synced_file`).
+
+`trash()` moves each item to the Drive trash (`trashed: true`; a 404 counts as already gone), removes
+the matching `synced_file` rows (including descendants), and carries on past individual failures.
+
+## 9. Database (Room v5, `data/local/`)
+
+| Table | Purpose |
+|---|---|
+| `app_settings` | single row id=1: folders, schedule, account email, theme, Wi-Fi only |
+| `upload_history` | one row per run: status, failureReason, message, bytesUploaded, md5Checksum, … |
+| `upload_session` | single in-flight resumable upload (section 7) |
+| `synced_file` | mirrored files/folders keyed by `relativePath` |
+
+`DatabaseMigrations` migrates every older schema (v1–v4) to v5, keeping settings and history. The
+v4→v5 migration rebuilds `app_settings` and `upload_history` via `_v5` temp tables and copies the rows
+across. Only the obsolete retry and resume columns are dropped, so an in-flight session from the old
+version is discarded. There is no
+destructive fallback. `DatabaseMigrationTest` covers each starting version (including hand-built
+variants of v2/v3). Any new version needs a migration and tests of its own. Schemas are exported to
+`app/schemas/` (uploaded as a CI artifact).
+
+## 10. Testing
+
+Unit tests live in `app/src/test/java/com/johnsonyuen/signalbackup/`, organised by package:
+
+- upload engine: `FileUploaderTest`, `UploadHelpersTest` with fakes in `UploadFakes.kt`
+- mirror: `MirrorSyncerTest`, `BackupFolderScannerTest`
+- use cases: `PerformUploadUseCaseTest`, `GarbageCollectUseCaseTest`, `ResolveDriveFolderUseCaseTest`
+- Drive client: `DriveRepositoryImplTest`
+- worker and scheduling: `UploadWorkerTest`, `DailyScheduleTest`, `UploadSchedulerImplTest`
+- data and UI: database migrations, repositories, ViewModels
+
+Time-dependent code takes an injected `Clock`, so tests use fixed clocks. Run them with
+`./gradlew testDebugUnitTest`.
