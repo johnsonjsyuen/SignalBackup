@@ -3,8 +3,7 @@ package com.johnsonyuen.signalbackup.util
 import android.content.Context
 import android.text.format.DateFormat
 import java.text.NumberFormat
-import java.time.LocalTime
-import java.time.format.DateTimeFormatter
+import java.util.Calendar
 import java.util.Locale
 
 private val SIZE_UNITS = arrayOf("B", "KiB", "MiB", "GiB", "TiB")
@@ -33,8 +32,11 @@ fun formatSpeed(bytesPerSecond: Long, locale: Locale = Locale.getDefault()): Str
 
 /** Time of day in the user's locale, honouring the system 12/24-hour setting. */
 fun formatTimeOfDay(context: Context, hour: Int, minute: Int): String {
-    val locale = context.resources.configuration.locales[0] ?: Locale.getDefault()
-    val skeleton = if (DateFormat.is24HourFormat(context)) "Hm" else "hm"
-    val pattern = DateFormat.getBestDateTimePattern(locale, skeleton)
-    return LocalTime.of(hour, minute).format(DateTimeFormatter.ofPattern(pattern, locale))
+    val calendar = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, hour)
+        set(Calendar.MINUTE, minute)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }
+    return DateFormat.getTimeFormat(context).format(calendar.time)
 }

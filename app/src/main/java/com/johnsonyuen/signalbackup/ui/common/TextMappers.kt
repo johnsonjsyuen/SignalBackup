@@ -97,12 +97,12 @@ fun upcomingTimeText(epochMillis: Long, nowMillis: Long): String {
         1L -> stringResource(R.string.tomorrow_at, time)
         else -> {
             val locale = context.currentLocale()
-            val pattern = DateFormat.getBestDateTimePattern(locale, "EEEMMMd")
-            stringResource(
-                R.string.date_at_time,
-                target.format(DateTimeFormatter.ofPattern(pattern, locale)),
-                time,
-            )
+            val date = try {
+                target.format(DateTimeFormatter.ofPattern(DateFormat.getBestDateTimePattern(locale, "EEEMMMd"), locale))
+            } catch (e: IllegalArgumentException) {
+                target.format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(locale))
+            }
+            stringResource(R.string.date_at_time, date, time)
         }
     }
 }
