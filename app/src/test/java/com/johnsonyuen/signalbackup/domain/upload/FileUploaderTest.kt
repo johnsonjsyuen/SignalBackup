@@ -7,7 +7,6 @@ import com.johnsonyuen.signalbackup.domain.model.LocalBackupFile
 import com.johnsonyuen.signalbackup.domain.model.ResumableUploadSession
 import com.johnsonyuen.signalbackup.domain.model.WifiRequiredException
 import io.mockk.coEvery
-import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
@@ -45,7 +44,17 @@ class FileUploaderTest {
         sessions = FakeUploadSessionRepository()
         val settings = mockk<SettingsRepository>()
         coEvery { settings.current() } answers {
-            mockk<AppSettings> { every { wifiOnly } returns this@FileUploaderTest.wifiOnly }
+            AppSettings(
+                localFolderUri = "content://local",
+                driveFolderId = PARENT,
+                driveFolderName = "Signal Backup",
+                scheduleEnabled = true,
+                scheduleHour = 3,
+                scheduleMinute = 0,
+                googleAccountEmail = "user@example.com",
+                themeMode = "SYSTEM",
+                wifiOnly = wifiOnly,
+            )
         }
         val policy = NetworkPolicy(settings) { unmetered }
         uploader = FileUploader(

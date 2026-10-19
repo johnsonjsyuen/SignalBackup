@@ -44,13 +44,14 @@ class SafLocalFileSource @Inject constructor(
     }
 
     override suspend fun open(uri: String): SeekableReader = withContext(Dispatchers.IO) {
-        val pfd = try {
+        val pfd: ParcelFileDescriptor? = try {
             context.contentResolver.openFileDescriptor(Uri.parse(uri), "r")
         } catch (e: SecurityException) {
             throw IOException("No permission to read local file", e)
         } catch (e: IllegalArgumentException) {
             throw FileNotFoundException("Local file not found")
-        } ?: throw FileNotFoundException("Local file could not be opened")
+        }
+        if (pfd == null) throw FileNotFoundException("Local file could not be opened")
         SafSeekableReader(pfd)
     }
 }
