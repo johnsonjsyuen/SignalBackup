@@ -26,6 +26,9 @@ interface UploadScheduler {
     /** Cancels everything, including the daily schedule (sign-out). */
     fun cancelAll()
 
+    /** Called by the worker when a scheduled run ends, so the next run lands on the chosen time again. */
+    suspend fun onScheduledRunFinished() {}
+
     /** Combined state of upload work for the UI. */
     fun observeRunState(): Flow<UploadRunState>
 

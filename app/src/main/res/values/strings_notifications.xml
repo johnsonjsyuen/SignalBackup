@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Channels -->
+    <string name="notif_channel_progress_name">Upload progress</string>
+    <string name="notif_channel_progress_desc">Shows progress while a backup is uploading.</string>
+    <string name="notif_channel_problems_name">Backup problems</string>
+    <string name="notif_channel_problems_desc">Tells you when backups fail or need your attention.</string>
+
+    <!-- Progress -->
+    <string name="notif_progress_title">Backing up to Google Drive</string>
+    <string name="notif_progress_preparing">Preparing…</string>
+    <string name="notif_progress_text">%1$s of %2$s</string>
+    <string name="notif_progress_text_speed">%1$s of %2$s · %3$s/s</string>
+
+    <!-- Problems -->
+    <string name="notif_failure_title">Backup failed</string>
+    <string name="notif_consent_title">Google Drive access needed</string>
+    <string name="notif_consent_text">Tap to allow Signal Backup to upload to Google Drive.</string>
+    <string name="notif_stale_title">Backups are out of date</string>
+    <string name="notif_stale_no_new_backup">Signal hasn\'t created a new backup since %1$s. Check Signal\'s backup settings.</string>
+    <string name="notif_stale_last_success">The last successful upload was on %1$s.</string>
+    <string name="notif_stale_never">No backup has been uploaded successfully yet.</string>
+
+    <string name="notif_fail_not_signed_in">Sign in to Google again to keep backing up.</string>
+    <string name="notif_fail_local_folder_not_set">Choose the folder where Signal saves its backups.</string>
+    <string name="notif_fail_local_folder_inaccessible">The Signal backup folder can\'t be read. Choose it again in Settings.</string>
+    <string name="notif_fail_no_backup">No Signal backups were found in the selected folder.</string>
+    <string name="notif_fail_drive_folder">The Google Drive folder can\'t be used. Check Settings.</string>
+    <string name="notif_fail_quota">Your Google Drive storage is full.</string>
+    <string name="notif_fail_network">Couldn\'t reach Google Drive. Will try again at the next scheduled time.</string>
+    <string name="notif_fail_server">Google Drive had a problem. Will try again at the next scheduled time.</string>
+    <string name="notif_fail_checksum">An uploaded file didn\'t match the original. Will try again at the next scheduled time.</string>
+    <string name="notif_fail_local_read">A backup file couldn\'t be read. Will try again at the next scheduled time.</string>
+    <string name="notif_fail_unknown">Something went wrong. Tap to see details.</string>
+</resources>
