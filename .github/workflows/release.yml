@@ -10,6 +10,8 @@ permissions: {}
 env:
   GRADLE_OPTS: -Dorg.gradle.console=plain
   ANNOTATE: python3 -I .github/scripts/annotate-gradle-errors.py
+  # Optional repository variable; empty/unset falls back to the default in app/build.gradle.kts.
+  WEB_CLIENT_ID: ${{ vars.WEB_CLIENT_ID }}
 
 jobs:
   release:
@@ -74,6 +76,7 @@ jobs:
           set -o pipefail
           mkdir -p ci-logs
           ./gradlew assembleRelease -PversionName="$VERSION_NAME" -PversionCode="$VERSION_CODE" \
+            ${WEB_CLIENT_ID:+"-Psignalbackup.webClientId=$WEB_CLIENT_ID"} \
             2>&1 | tee ci-logs/assembleRelease.log \
             || { $ANNOTATE ci-logs/assembleRelease.log "assembleRelease"; exit 1; }
 
@@ -91,7 +94,19 @@ jobs:
           apk="SignalBackup-${VERSION_NAME}.apk"
           cp "$src" "$apk"
           apksigner=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)/apksigner
-          "$apksigner" verify --verbose --print-certs "$apk"
+          certs=$("$apksigner" verify --verbose --print-certs "$apk")
+          echo "$certs"
+          {
+            echo "### Release APK signing certificate"
+            echo
+            echo "Register this SHA-1 as an Android OAuth client (package \`com.johnsonyuen.signalbackup\`) in the Cloud project of the Web client ID, or Google sign-in fails. APKs installed from Google Play are re-signed with the Play App Signing key, which needs its own client."
+            echo
+            echo "Web client ID: \`${WEB_CLIENT_ID:-default from app/build.gradle.kts}\`"
+            echo
+            echo '```'
+            echo "$certs" | grep -E 'SHA-1|SHA-256|DN:' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           sha256sum "$apk" > SHA256SUMS.txt
           cat SHA256SUMS.txt
           echo "path=$apk" >> "$GITHUB_OUTPUT"

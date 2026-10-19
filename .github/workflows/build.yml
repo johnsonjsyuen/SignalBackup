@@ -15,6 +15,8 @@ permissions: {}
 env:
   GRADLE_OPTS: -Dorg.gradle.console=plain
   ANNOTATE: python3 -I .github/scripts/annotate-gradle-errors.py
+  # Optional repository variable; empty/unset falls back to the default in app/build.gradle.kts.
+  WEB_CLIENT_ID: ${{ vars.WEB_CLIENT_ID }}
 
 jobs:
   build:
@@ -37,33 +39,70 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
 
+      - name: Decode debug keystore
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          # Secrets are not available to pull requests from forks; that's expected.
+          if [ -z "$DEBUG_KEYSTORE_BASE64" ]; then
+            echo "::warning title=Debug signing::DEBUG_KEYSTORE_BASE64 secret is not set. The debug APK is signed with a throwaway per-runner key whose SHA-1 changes every run, so Google sign-in will fail in it. See CI_CD_GUIDE.md."
+            exit 0
+          fi
+          echo "$DEBUG_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/debug.keystore"
+          echo "DEBUG_KEYSTORE_FILE=$RUNNER_TEMP/debug.keystore" >> "$GITHUB_ENV"
+
       - name: Build debug APK
         id: assemble
         run: |
           set -o pipefail
           mkdir -p ci-logs
-          ./gradlew assembleDebug 2>&1 | tee ci-logs/assembleDebug.log \
+          ./gradlew assembleDebug ${WEB_CLIENT_ID:+"-Psignalbackup.webClientId=$WEB_CLIENT_ID"} 2>&1 | tee ci-logs/assembleDebug.log \
             || { $ANNOTATE ci-logs/assembleDebug.log "assembleDebug"; exit 1; }
+
+      - name: Print debug APK signing certificate
+        if: ${{ !cancelled() && steps.assemble.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          apk=$(ls app/build/outputs/apk/debug/*.apk | head -n1)
+          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)/apksigner
+          certs=$("$apksigner" verify --print-certs "$apk")
+          echo "$certs"
+          {
+            echo "### Debug APK signing certificate"
+            echo
+            if [ -n "${DEBUG_KEYSTORE_FILE:-}" ]; then
+              echo "Signed with the \`DEBUG_KEYSTORE_BASE64\` key. Register this SHA-1 as an Android OAuth client (package \`com.johnsonyuen.signalbackup\`) in the Cloud project of the Web client ID."
+            else
+              echo "**Signed with a throwaway per-runner debug key; Google sign-in will not work in this APK.** Set the \`DEBUG_KEYSTORE_BASE64\` secret (see CI_CD_GUIDE.md)."
+            fi
+            echo
+            echo "Web client ID: \`${WEB_CLIENT_ID:-default from app/build.gradle.kts}\`"
+            echo
+            echo '```'
+            echo "$certs" | grep -E 'SHA-1|SHA-256|DN:' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Unit tests
         if: ${{ !cancelled() && steps.assemble.outcome == 'success' }}
         run: |
           set -o pipefail
-          ./gradlew testDebugUnitTest 2>&1 | tee ci-logs/testDebugUnitTest.log \
+          ./gradlew testDebugUnitTest ${WEB_CLIENT_ID:+"-Psignalbackup.webClientId=$WEB_CLIENT_ID"} 2>&1 | tee ci-logs/testDebugUnitTest.log \
             || { $ANNOTATE ci-logs/testDebugUnitTest.log "testDebugUnitTest"; exit 1; }
 
       - name: Lint
         if: ${{ !cancelled() && steps.assemble.outcome == 'success' }}
         run: |
           set -o pipefail
-          ./gradlew lintDebug 2>&1 | tee ci-logs/lintDebug.log \
+          ./gradlew lintDebug ${WEB_CLIENT_ID:+"-Psignalbackup.webClientId=$WEB_CLIENT_ID"} 2>&1 | tee ci-logs/lintDebug.log \
             || { $ANNOTATE ci-logs/lintDebug.log "lintDebug"; exit 1; }
 
       - name: Build release APK (unsigned)
         if: ${{ !cancelled() && steps.assemble.outcome == 'success' }}
         run: |
           set -o pipefail
-          ./gradlew assembleRelease 2>&1 | tee ci-logs/assembleRelease.log \
+          ./gradlew assembleRelease ${WEB_CLIENT_ID:+"-Psignalbackup.webClientId=$WEB_CLIENT_ID"} 2>&1 | tee ci-logs/assembleRelease.log \
             || { $ANNOTATE ci-logs/assembleRelease.log "assembleRelease"; exit 1; }
 
       - name: Upload debug APK
@@ -111,3 +150,7 @@ jobs:
           path: ci-logs/
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Remove debug keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/debug.keystore"

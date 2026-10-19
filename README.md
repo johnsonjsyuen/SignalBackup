@@ -103,6 +103,25 @@ Sign-in and Drive access need OAuth clients in a Google Cloud project you contro
    keytool -list -v -keystore release.jks -alias <alias>
    ```
 
+### Troubleshooting: Google sign-in fails silently
+
+Symptom: the account picker appears, you pick an account, the picker closes and nothing happens
+(logcat shows `[16] Account reauth failed` or a `GetCredentialException`). Google rejected the APK's
+signing certificate. Check:
+
+1. **Every key that signs an APK you install has an Android OAuth client** (package
+   `com.johnsonyuen.signalbackup` + that key's SHA-1): your local debug key, the CI
+   `DEBUG_KEYSTORE_BASE64` key, the release key, and the Play App Signing key if installed from Play.
+2. **They are in the same Cloud project as the Web client ID** the APK was built with
+   (`signalbackup.webClientId`, CI variable `WEB_CLIENT_ID`, or the default in `app/build.gradle.kts`).
+3. **Consent screen** is External and, while in Testing, your account is a test user.
+
+Get a SHA-1 with `./gradlew signingReport`, `keytool -list -v -keystore <keystore>`, or from the
+"signing certificate" section of a CI run's step summary. CI debug APKs signed without the
+`DEBUG_KEYSTORE_BASE64` secret use a throwaway key and can never sign in (see
+[CI_CD_GUIDE.md](CI_CD_GUIDE.md#google-sign-in-fails-silently)). Logs:
+`adb logcat | grep -iE "credential|reauth"`.
+
 ### Build and test
 
 ```bash
