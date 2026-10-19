@@ -49,6 +49,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -186,7 +187,7 @@ class HomeViewModelTest {
         coEvery { authorizer.requestAuthorization() } returns pendingIntent
         coEvery { authorizer.handleAuthorizationResult(any()) } returns true
         val vm = viewModel()
-        backgroundScope.launch { vm.uiState.collect {} }
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
 
         vm.events.test {
             vm.onFix(ResultFix.GRANT_ACCESS)
@@ -211,7 +212,7 @@ class HomeViewModelTest {
         coEvery { gc.scan() } throws NeedsConsentException()
         coEvery { authorizer.requestAuthorization() } returns pendingIntent
         val vm = viewModel()
-        backgroundScope.launch { vm.uiState.collect {} }
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
 
         vm.events.test {
             vm.openCleanUp()
@@ -257,7 +258,7 @@ class HomeViewModelTest {
         val never = CompletableDeferred<GcScanResult>()
         coEvery { gc.scan() } coAnswers { never.await() }
         val vm = viewModel()
-        backgroundScope.launch { vm.uiState.collect {} }
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
 
         vm.openCleanUp()
         assertEquals(CleanUpState.Scanning, vm.uiState.value.cleanUp)
@@ -276,7 +277,7 @@ class HomeViewModelTest {
         val result = GcTrashResult(1, 20, emptyList())
         coEvery { gc.trash(trash) } returns result
         val vm = viewModel()
-        backgroundScope.launch { vm.uiState.collect {} }
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
 
         vm.openCleanUp()
         assertEquals(CleanUpState.Ready(kept, trash), vm.uiState.value.cleanUp)

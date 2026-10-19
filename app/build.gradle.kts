@@ -199,4 +199,9 @@ tasks.withType<Test>().configureEach {
     maxHeapSize = "2g"
     maxParallelForks = 2
     forkEvery = 20
+    // Print exception messages and stack traces so CI annotations show why a test failed.
+    testLogging {
+        events(org.gradle.api.tasks.testing.logging.TestLogEvent.FAILED)
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }

@@ -11,6 +11,7 @@ import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import androidx.work.await
 import androidx.work.workDataOf
 import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
 import com.johnsonyuen.signalbackup.domain.model.AppSettings
@@ -66,15 +67,15 @@ class UploadSchedulerImpl @Inject constructor(
             when {
                 // Nothing armed: start a fresh period pinned to the chosen time.
                 existing == null ->
-                    enqueuePeriodic(settings, ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE, pin = true)
+                    enqueuePeriodic(settings, replace = true, pin = true)
                 // Same time: only constraints may differ; keep the current timing.
                 tag in existing.tags ->
-                    enqueuePeriodic(settings, ExistingPeriodicWorkPolicy.UPDATE, pin = false)
+                    enqueuePeriodic(settings, replace = false, pin = false)
                 // Time changed while a run is in progress: don't interrupt it, re-pin the next run.
                 existing.state == WorkInfo.State.RUNNING ->
-                    enqueuePeriodic(settings, ExistingPeriodicWorkPolicy.UPDATE, pin = true)
+                    enqueuePeriodic(settings, replace = false, pin = true)
                 else ->
-                    enqueuePeriodic(settings, ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE, pin = true)
+                    enqueuePeriodic(settings, replace = true, pin = true)
             }
         }
     }
@@ -83,7 +84,7 @@ class UploadSchedulerImpl @Inject constructor(
         scheduleMutex.withLock {
             val settings = settingsRepository.current()
             if (!settings.scheduleEnabled || !settings.isSetupComplete) return
-            enqueuePeriodic(settings, ExistingPeriodicWorkPolicy.UPDATE, pin = true)
+            enqueuePeriodic(settings, replace = false, pin = true)
         }
     }
 
@@ -114,7 +115,7 @@ class UploadSchedulerImpl @Inject constructor(
                     val settings = settingsRepository.current()
                     if (settings.scheduleEnabled && settings.isSetupComplete) {
                         // Replaces (and so stops) the current run while keeping the daily schedule armed.
-                        enqueuePeriodic(settings, ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE, pin = true)
+                        enqueuePeriodic(settings, replace = true, pin = true)
                     } else {
                         workManager.cancelUniqueWork(PERIODIC_WORK_NAME)
                     }
@@ -153,11 +154,19 @@ class UploadSchedulerImpl @Inject constructor(
         workManager.getWorkInfosForUniqueWorkFlow(PERIODIC_WORK_NAME).first()
             .firstOrNull { !it.state.isFinished }
 
-    private fun enqueuePeriodic(
+    /**
+     * Enqueues the daily work. [replace] starts a fresh period (cancelling any current run first);
+     * otherwise the existing work is updated in place.
+     *
+     * WorkManager rejects a next-schedule-time override combined with CANCEL_AND_REENQUEUE, so a
+     * replacement is an explicit cancel followed by UPDATE (which enqueues anew once the old work is finished).
+     */
+    private suspend fun enqueuePeriodic(
         settings: AppSettings,
-        policy: ExistingPeriodicWorkPolicy,
+        replace: Boolean,
         pin: Boolean,
     ) {
+        if (replace) workManager.cancelUniqueWork(PERIODIC_WORK_NAME).await()
         val now = ZonedDateTime.now(clock)
         val next = DailySchedule.nextRun(now, settings.scheduleHour, settings.scheduleMinute)
         val constraints = Constraints.Builder()
@@ -171,8 +180,10 @@ class UploadSchedulerImpl @Inject constructor(
             .addTag(scheduleTag(settings))
         // Flex would otherwise push the first run (interval - flex) past the initial delay.
         if (pin) builder.setNextScheduleTimeOverride(next.toInstant().toEpochMilli())
-        workManager.enqueueUniquePeriodicWork(PERIODIC_WORK_NAME, policy, builder.build())
-        Log.d(TAG, "Daily schedule applied (policy=$policy, pinned=$pin)")
+        workManager
+            .enqueueUniquePeriodicWork(PERIODIC_WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, builder.build())
+            .await()
+        Log.d(TAG, "Daily schedule applied (replaced=$replace, pinned=$pin)")
     }
 
     private fun scheduleTag(settings: AppSettings): String =
