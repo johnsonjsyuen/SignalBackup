@@ -80,7 +80,13 @@ class DriveAuthorizationFlow @Inject constructor(
             Log.w(TAG, "Resolving Drive folder failed: ${e.javaClass.simpleName}")
             errorText(e)
         }
-        uploadScheduler.applySchedule()
+        try {
+            uploadScheduler.applySchedule()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Applying schedule failed: ${e.javaClass.simpleName}")
+        }
         return message
     }
 

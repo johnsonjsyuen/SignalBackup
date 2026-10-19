@@ -23,6 +23,8 @@ data class HomeUiState(
     val nextRunMillis: Long? = null,
     val scheduleEnabled: Boolean = true,
     val authorizing: Boolean = false,
+    /** A Credential Manager sign-in is in flight. */
+    val signingIn: Boolean = false,
     val cleanUp: CleanUpState = CleanUpState.Hidden,
 ) {
     val isUploadActive: Boolean get() = run !is UploadRunState.Idle

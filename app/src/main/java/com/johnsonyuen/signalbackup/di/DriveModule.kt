@@ -9,6 +9,8 @@ import com.google.api.client.json.JsonFactory
 import com.google.api.client.json.gson.GsonFactory
 import com.johnsonyuen.signalbackup.data.auth.DriveAuthorizer
 import com.johnsonyuen.signalbackup.data.auth.DriveAuthorizerImpl
+import com.johnsonyuen.signalbackup.data.auth.GoogleAccountSignIn
+import com.johnsonyuen.signalbackup.data.auth.GoogleAccountSignInImpl
 import com.johnsonyuen.signalbackup.data.repository.DriveRepository
 import com.johnsonyuen.signalbackup.data.repository.DriveRepositoryImpl
 import dagger.Binds
@@ -31,6 +33,9 @@ abstract class DriveModule {
     @Binds
     @Singleton
     abstract fun bindDriveAuthorizer(impl: DriveAuthorizerImpl): DriveAuthorizer
+
+    @Binds
+    abstract fun bindGoogleAccountSignIn(impl: GoogleAccountSignInImpl): GoogleAccountSignIn
 
     companion object {
         @Provides

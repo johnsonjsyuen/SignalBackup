@@ -138,6 +138,8 @@
     <string name="error_network">Couldn\'t reach Google Drive. Check your connection and try again.</string>
     <string name="error_unknown">Something went wrong. Try again.</string>
     <string name="sign_in_failed">Sign-in failed. Try again.</string>
+    <string name="sign_in_failed_detail">Sign-in failed: %1$s</string>
+    <string name="sign_in_failed_config">Google sign-in failed (%1$s). This build\'s signing key may not be registered with Google, or your account isn\'t a test user. See README › Google Cloud project.</string>
     <string name="sign_in_no_accounts">No Google accounts found on this device.</string>
     <string name="sign_in_no_email">Sign-in succeeded but no email address was returned.</string>
     <string name="signed_out">Signed out</string>
