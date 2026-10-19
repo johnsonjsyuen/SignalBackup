@@ -85,7 +85,7 @@ def main() -> int:
         elif (m := TEST_FAILED.match(ln)):
             detail = []
             j = i + 1
-            while j < len(lines) and lines[j].startswith((" ", "\t")) and len(detail) < 4:
+            while j < len(lines) and lines[j].startswith((" ", "\t")) and len(detail) < 8:
                 if lines[j].strip():
                     detail.append(lines[j].strip())
                 j += 1

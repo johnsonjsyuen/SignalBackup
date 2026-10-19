@@ -29,6 +29,7 @@ import io.mockk.unmockkAll
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -83,7 +84,7 @@ class SettingsViewModelTest {
     @Test
     fun `picker resets its stack and list every time it opens`() = runTest {
         val vm = viewModel()
-        backgroundScope.launch { vm.uiState.collect {} }
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
 
         vm.openDrivePicker()
         assertEquals(root, vm.uiState.value.picker.folders)
@@ -106,7 +107,7 @@ class SettingsViewModelTest {
         val slowRoot = CompletableDeferred<List<DriveFolder>>()
         coEvery { drive.listFolders(null) } coAnswers { slowRoot.await() }
         val vm = viewModel()
-        backgroundScope.launch { vm.uiState.collect {} }
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
 
         vm.openDrivePicker()
         assertTrue(vm.uiState.value.picker.loading)
@@ -120,7 +121,7 @@ class SettingsViewModelTest {
     fun `load error shows message and retry reloads`() = runTest {
         coEvery { drive.listFolders(null) } throws java.io.IOException("offline") andThen root
         val vm = viewModel()
-        backgroundScope.launch { vm.uiState.collect {} }
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
 
         vm.openDrivePicker()
         assertTrue(vm.uiState.value.picker.error != null)
@@ -135,7 +136,7 @@ class SettingsViewModelTest {
         coEvery { drive.listFolders(null) } throws NeedsConsentException()
         coEvery { authorizer.requestAuthorization() } returns pendingIntent
         val vm = viewModel()
-        backgroundScope.launch { vm.uiState.collect {} }
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
 
         vm.events.test {
             vm.openDrivePicker()
