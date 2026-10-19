@@ -44,18 +44,21 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Required to acquire a WiFi lock so the network stays active during large uploads. -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- Required for Wi-Fi-only checks and WorkManager network constraints. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Required to launch the system dialog asking the user to disable battery optimization for this app. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:name=".SignalBackupApp"
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.SignalBackup">
+        android:theme="@style/Theme.SignalBackup"
+        tools:targetApi="31">
 
         <!--
           Declare the foreground service type for WorkManager's SystemForegroundService.
@@ -89,19 +92,6 @@
                 tools:node="remove" />
         </provider>
 
-        <receiver
-            android:name=".receiver.UploadAlarmReceiver"
-            android:exported="false" />
-
-        <receiver
-            android:name=".receiver.BootCompletedReceiver"
-            android:exported="true"
-            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-            </intent-filter>
-        </receiver>
-
         <!--
           The single Activity that hosts the entire Compose UI.
           android:exported="true" is required for the LAUNCHER intent filter.
@@ -109,6 +99,7 @@
         -->
         <activity
             android:name=".MainActivity"
+            android:launchMode="singleTop"
             android:exported="true"
             android:theme="@style/Theme.SignalBackup">
             <intent-filter>

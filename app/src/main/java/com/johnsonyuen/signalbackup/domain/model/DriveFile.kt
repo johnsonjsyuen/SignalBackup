@@ -1,17 +1,11 @@
 package com.johnsonyuen.signalbackup.domain.model
 
-/**
- * Domain model representing a file stored on Google Drive.
- *
- * Used by the garbage collection feature to display backup files
- * and their sizes to the user for deletion confirmation.
- *
- * @param id The Google Drive file ID.
- * @param name The file display name (e.g., "signal-2024-03-08-12-00-00.backup").
- * @param sizeBytes The file size in bytes.
- */
+/** A backup item on Drive as shown in the Clean Up dialog (a legacy file or a snapshot folder). */
 data class DriveFile(
     val id: String,
     val name: String,
+    /** File size, or total size of a folder's contents when known (0 when unknown). */
     val sizeBytes: Long,
+    val isFolder: Boolean = false,
+    val createdTimeMillis: Long? = null,
 )

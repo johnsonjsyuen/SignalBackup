@@ -1,314 +1,157 @@
 # Signal Backup
 
-An Android app that automatically backs up Signal messenger backup files to Google Drive on a configurable daily schedule.
+An Android app that copies Signal's on-device backups to Google Drive once a day.
 
-Signal produces local `.backup` files but does not provide built-in cloud backup. This app bridges that gap by monitoring a local folder for the latest backup file and uploading it to a Google Drive folder of your choice.
+Signal can write backups to a folder on your phone but does not upload them anywhere. This app mirrors
+that folder into a folder in your Google Drive, verifies every upload, and tells you when something
+goes wrong or when Signal stops producing new backups.
 
-## Features
+## What it does
 
-**Uploads**
-- Manual one-tap upload from the home screen
-- Scheduled daily uploads at a user-configured time via WorkManager
-- Resumable uploads that survive app kills, process death, and device reboots -- the upload resumes from the last confirmed byte on the next attempt
-- Chunked upload protocol (5 MB chunks) for resilience on mobile networks
-- Real-time progress display with speed, percentage, and estimated time remaining
-- Foreground service with notification showing upload progress
-- WiFi lock and WakeLock to prevent network/CPU suspension during large uploads
-- Automatic retry with exponential backoff on transient failures
+- **Mirrors the selected folder.** The app copies the whole folder tree you pick (via the Storage
+  Access Framework) into the Drive folder, keeping the same relative paths; subfolders become Drive
+  folders. It handles both backup formats:
+  - newer Signal versions write snapshot folders (`signal-backup-YYYY-MM-DD-HH-MM-SS/` containing
+    `backup.db`, `attachments/`, `manifest.json`, …);
+  - older versions write single files (`signal-YYYY-MM-DD-HH-MM-SS.backup`).
+- **Uploads each file once.** Uploaded files are recorded (path, size, last-modified) and only
+  re-uploaded if they change. Hidden files, `*.tmp`, `*.partial` and files modified in the last
+  2 minutes (still being written) are skipped. A file already on Drive with the same name, size and
+  MD5 is adopted instead of re-uploaded. Inside a snapshot, `manifest.json` is uploaded last.
+- **Resumable, verified uploads.** Files of 5 MiB or more use Drive's resumable protocol in 8 MiB
+  chunks; progress survives app kills and retries. After upload the size and MD5 are checked against
+  the local file; a mismatched copy is moved to the Drive trash and retried.
+- **Daily schedule.** A WorkManager periodic job runs once a day at about the time you choose
+  (2-hour flex window; requires a network, Wi-Fi if "Wi-Fi only" is on, and battery not low).
+  "Upload now" queues an expedited one-off run. Only one run happens at a time.
+- **History and notifications.** Every run is logged (success, failed with a reason, or "no new
+  backup"). Failures that won't fix themselves post a notification with a button that takes you to
+  the fix (sign in, grant Drive access, choose folder, …). You are also notified when the newest
+  local backup is more than 48 hours old, or when a run fails and the last successful backup is
+  more than 36 hours old.
+- **Clean Up (manual).** Nothing is ever deleted from Drive automatically. "Clean up old backups"
+  scans Drive and, after you confirm, moves to the **Drive trash** (restorable for 30 days):
+  - mirrored items whose local copy Signal has since deleted, and
+  - older legacy `signal-*.backup` files at the top of the Drive folder that this app uploaded.
 
-**Google Drive Integration**
-- Built-in folder picker to browse, navigate, and select any Drive folder
-- Create new folders directly from the folder picker without leaving the app
-- OAuth2 authentication via Google Sign-In
+  Safety rules: it always keeps the 3 newest backup items, never touches anything still present
+  locally, and refuses to run unless the newest backup on Drive has been verified by this app (and
+  the local folder is readable). Items are trashed, never permanently deleted.
+- **Limited Drive access.** The app uses the `drive.file` scope, so it can only see files and folders
+  it created. On first run (or if the configured folder is no longer accessible) it creates a folder
+  named **"Signal Backup"** in My Drive and uses it. The in-app folder picker only lists folders the
+  app created and can create new ones.
+- **Sign-out** revokes Drive access, cancels scheduled work, and forgets the account, the selected
+  folders and upload state. Backups already on Drive are kept.
 
-**Local File Access**
-- Storage Access Framework (SAF) folder picker for selecting the Signal backup directory
-- Persistent URI permissions survive app restarts -- no need to re-select the folder
+## Using the app
 
-**Upload History**
-- Persistent log of all upload attempts (successes and failures) stored in a local Room database
-- Each record shows file name, timestamp, file size, and status
+1. **Turn on on-device backups in Signal** (Signal › Settings › Chats › Backups) and note the folder
+   Signal writes to.
+2. **Install the APK** from the repository's
+   [GitHub Releases](https://github.com/johnsonjsyuen/SignalBackup/releases) page
+   (`SignalBackup-<version>.apk`, with `SHA256SUMS.txt` and a build-provenance attestation). You
+   need to allow installing apps from your browser or file manager.
+3. Open the app and **sign in with Google**, then **allow Google Drive access** on the consent
+   screen that follows.
+4. **Choose Signal's backup folder** (the folder itself, so the app can read everything in it).
+5. In **Settings** set the backup time, Wi-Fi only, and theme, and grant the permissions listed there:
+   - **Notifications** (Android 13+), so you hear about failures;
+   - **Battery optimization**: allow background activity so the daily job isn't delayed;
+   - **Pause app activity if unused**: turn this off so Android doesn't stop backups when you rarely
+     open the app.
+6. Tap **Upload now** once to check everything works. The Home tab shows progress, the last result
+   and the next scheduled run; the History tab lists every run.
 
-**Appearance**
-- Light, Dark, and System Default theme modes
-- Material Design 3 with Material You dynamic theming
+The first upload of a large backup can take a while. On Android 15+ a single `dataSync` foreground
+session is time-limited; if it is stopped, the next attempt resumes where it left off.
 
-**Other**
-- Three-tab navigation: Home, History, Settings
-- Countdown timer on the home screen showing time until the next scheduled upload
-- Build info displayed in Settings (build timestamp)
-- `android:allowBackup="false"` for security -- the app does not back up its own data to Android's backup service
+## Developer setup
 
-## Tech Stack
+### Requirements
 
-| Category | Libraries |
-|---|---|
-| Language | Kotlin 2.0 |
-| UI | Jetpack Compose with Material 3 |
-| Architecture | Clean Architecture (data/domain/ui layers) |
-| Dependency Injection | Hilt (Dagger) |
-| Background Work | WorkManager with CoroutineWorker |
-| Local Database | Room |
-| Preferences | DataStore (Preferences) |
-| Cloud Storage | Google Drive API v3 (REST) |
-| Authentication | Google Sign-In + GoogleAccountCredential |
-| Navigation | Navigation Compose with type-safe routes (kotlinx.serialization) |
-| Networking | Google API Client for Android, Jackson Core |
-| File Access | AndroidX DocumentFile (Storage Access Framework) |
-| Concurrency | Kotlin Coroutines |
+- JDK 21 (CI uses Temurin 21). The Gradle wrapper (Gradle 9.8.1) is included.
+- Android SDK with platform 37 installed (compileSdk 37, targetSdk 36, minSdk 26).
+
+### Google Cloud project
+
+Sign-in and Drive access need OAuth clients in a Google Cloud project you control:
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/) create a project.
+2. **Enable the Google Drive API** (APIs & Services › Library).
+3. Configure the **OAuth consent screen** (Google Auth Platform): external user type, app name and
+   support email, and add the scope `https://www.googleapis.com/auth/drive.file`. While the app is in
+   "Testing", **add your Google account as a test user**, or sign-in/consent will fail.
+4. Create a **Web application** OAuth client. Its client ID is passed to Credential Manager
+   ("Sign in with Google"). Put it in `local.properties` (not committed) or pass it as a Gradle property:
+
+   ```properties
+   # local.properties
+   signalbackup.webClientId=1234567890-abc.apps.googleusercontent.com
+   ```
+
+   or `./gradlew assembleDebug -Psignalbackup.webClientId=...`. If unset, the build falls back to
+   the ID hard-coded in `app/build.gradle.kts`, which belongs to the maintainer's project and won't
+   work with your signing keys.
+5. Create **Android** OAuth clients for package `com.johnsonyuen.signalbackup`, one per signing key,
+   with that key's SHA-1. Play services' `AuthorizationClient` uses these to issue Drive tokens.
+
+   ```bash
+   # debug key
+   keytool -list -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android -keypass android
+   # release key
+   keytool -list -v -keystore release.jks -alias <alias>
+   ```
+
+### Build and test
+
+```bash
+./gradlew assembleDebug          # debug APK
+./gradlew testDebugUnitTest      # JVM unit tests (JUnit4, Robolectric, MockK, Turbine)
+./gradlew lintDebug              # Android Lint (abortOnError)
+./gradlew assembleRelease        # release APK; signed only if KEYSTORE_FILE etc. are set
+```
+
+Release signing reads `KEYSTORE_FILE`, `KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD` from the
+environment; without `KEYSTORE_FILE` the release APK is unsigned. Version name/code default to
+`1.0`/`1` and can be overridden with `-PversionName=` / `-PversionCode=` (CI derives them from the
+tag). See [CI_CD_GUIDE.md](CI_CD_GUIDE.md) for workflows and releases, and
+[IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md) for how the upload pipeline works.
 
 ## Architecture
 
-### Layer Overview
-
-The app follows Clean Architecture with three layers. The UI layer observes state via Kotlin `StateFlow`. The domain layer contains use cases that orchestrate business logic. The data layer handles persistence (Room, DataStore) and network I/O (Google Drive REST API).
-
-```
-+-------------------------------------------------------------------+
-|                           UI Layer                                |
-|                                                                   |
-|  HomeScreen         HistoryScreen         SettingsScreen           |
-|      |                   |                     |                  |
-|  HomeViewModel      HistoryViewModel      SettingsViewModel       |
-|      |                   |                     |                  |
-+------+-------------------+---------------------+------------------+
-       |                   |                     |
-+------+-------------------+---------------------+------------------+
-|                         Domain Layer                              |
-|                                                                   |
-|  ManualUploadUseCase   PerformUploadUseCase   ScheduleUploadUseCase|
-|        |                      |                      |            |
-+--------+----------------------+----------------------+------------+
-         |                      |                      |
-+--------+----------------------+----------------------+------------+
-|                          Data Layer                               |
-|                                                                   |
-|  SettingsRepository    DriveRepository    UploadHistoryRepository  |
-|        |                    |                     |               |
-|  SettingsDataStore   GoogleDriveService     Room Database          |
-|   (DataStore)        (Drive REST API)    (UploadHistoryDao)       |
-|        |                    |                     |               |
-+--------+--------------------+---------------------+---------------+
-         |                    |                     |
-    SharedPrefs        Google Drive API        SQLite DB
-      (XML)             (HTTPS)               (Local)
-```
-
-### Upload Data Flow
-
-This diagram shows how a manual upload flows from the user tap through every component down to Google Drive.
-
-```mermaid
-flowchart LR
-    User([User taps Upload]) --> HomeScreen
-    HomeScreen --> HomeViewModel
-    HomeViewModel --> ManualUploadUseCase
-    ManualUploadUseCase --> WorkManager
-
-    subgraph Background ["Background (survives app kill)"]
-        WorkManager --> UploadWorker
-        UploadWorker --> PerformUploadUseCase
-        PerformUploadUseCase --> GoogleDriveService
-    end
-
-    GoogleDriveService --> Drive[(Google Drive)]
-
-    UploadWorker -- "progress (StateFlow)" --> HomeViewModel
-    HomeViewModel -- "UploadStatus + UploadProgress" --> HomeScreen
-```
-
-### Upload Flow (Manual and Scheduled)
+Single-module app: Jetpack Compose UI with ViewModels, Hilt DI, Room for state, WorkManager for
+background runs, and a small Drive v3 REST client built on google-http-client.
 
 ```mermaid
 flowchart TD
-    Start([Upload Triggered]) --> CheckType{Manual or Scheduled?}
-
-    CheckType -- "Manual (user tap)" --> ManualUseCase["ManualUploadUseCase\nenqueues OneTimeWorkRequest\n(EXPEDITED, KEEP policy)"]
-    CheckType -- "Scheduled (daily)" --> ScheduleUseCase["ScheduleUploadUseCase\nenqueues PeriodicWorkRequest"]
-
-    ManualUseCase --> Worker
-    ScheduleUseCase --> Worker
-
-    Worker["UploadWorker.doWork()"] --> FG["Promote to Foreground Service\n(DATA_SYNC notification)"]
-    FG --> FGResult{Foreground\nsucceeded?}
-
-    FGResult -- "No (manual)" --> Retry["Return Result.retry()"]
-    FGResult -- "No (scheduled)" --> Proceed
-    FGResult -- "Yes" --> Proceed
-
-    Proceed["Acquire WiFi Lock + WakeLock"] --> Upload
-
-    Upload["PerformUploadUseCase"] --> CheckSession{Saved resumable\nsession exists?}
-
-    CheckSession -- "Yes" --> ValidateSession["Validate session:\n- Not expired (< 6 days)\n- Same Drive folder\n- Same file + size"]
-    CheckSession -- "No" --> FindFile
-
-    ValidateSession --> Valid{Valid?}
-    Valid -- "Yes" --> QueryServer["Query Google for\nconfirmed bytes\n(PUT with empty body)"]
-    Valid -- "No" --> ClearSession["Clear saved session"] --> FindFile
-
-    QueryServer --> ServerResult{Server\nresponse?}
-    ServerResult -- "308 + Range header" --> Resume["Resume upload from\nconfirmed byte offset"]
-    ServerResult -- "200 (already done)" --> RecordSuccess
-    ServerResult -- "404 (expired)" --> ClearSession
-
-    FindFile["Find latest .backup\nvia SAF DocumentFile"] --> InitSession["Initiate resumable session\n(POST to Drive upload endpoint)"]
-    InitSession --> SaveSession["Save session to DataStore\n(URI, file, offset, folder, timestamp)"]
-    SaveSession --> FreshUpload["Start chunked upload\nfrom byte 0"]
-
-    Resume --> ChunkLoop
-    FreshUpload --> ChunkLoop
-
-    ChunkLoop["Upload 5 MB chunk\n(PUT with Content-Range)"] --> ChunkResult{Response?}
-
-    ChunkResult -- "308 (more needed)" --> PersistProgress["Persist confirmed bytes\nto DataStore + notify UI"] --> ChunkLoop
-    ChunkResult -- "200/201 (complete)" --> ClearSessionDone["Clear saved session"]
-    ChunkResult -- "Error" --> PreserveSession["Preserve session for retry\n(WorkManager will re-run)"]
-
-    ClearSessionDone --> RecordSuccess["Record success in\nRoom database"]
-    PreserveSession --> RecordFailure["Record failure in\nRoom database"]
-
-    RecordSuccess --> Success([Upload Complete])
-    RecordFailure --> RetryOrFail{Attempts\n< 3?}
-    RetryOrFail -- "Yes" --> Retry
-    RetryOrFail -- "No" --> Failure([Give Up])
+    UI["Home / Settings (Compose)"] -->|Upload now| Sched[UploadSchedulerImpl]
+    Sched -->|unique periodic + expedited one-time work| Worker[UploadWorker<br/>dataSync foreground]
+    Worker --> Perform[PerformUploadUseCase<br/>process-wide mutex]
+    Perform --> Resolve[ResolveDriveFolderUseCase]
+    Perform --> Scan[BackupFolderScanner<br/>SAF tree]
+    Perform --> Mirror[MirrorSyncer]
+    Mirror --> Uploader[FileUploader<br/>resumable + verify]
+    Uploader --> Drive[(Google Drive<br/>drive.file)]
+    Perform --> History[(Room: upload_history)]
+    Worker --> Notifier[BackupNotifier]
 ```
 
-### Resumable Upload Protocol (Sequence Diagram)
+## Tech stack
 
-This shows the HTTP-level interaction between the app and Google Drive for the manual resumable upload protocol. The session URI persists across app kills, allowing uploads to resume days later.
-
-```mermaid
-sequenceDiagram
-    participant App as PerformUploadUseCase
-    participant DS as DataStore
-    participant GD as Google Drive API
-
-    Note over App: Fresh upload (no saved session)
-
-    App->>GD: POST /upload/drive/v3/files?uploadType=resumable<br/>Headers: X-Upload-Content-Type, X-Upload-Content-Length<br/>Body: {name, parents}
-    GD-->>App: 200 OK<br/>Location: https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=SESSION_ID
-
-    App->>DS: Save session (URI, file, offset=0, folder, timestamp)
-
-    loop For each 5 MB chunk
-        App->>GD: PUT session_uri<br/>Content-Range: bytes 0-5242879/total<br/>Body: [chunk data]
-        GD-->>App: 308 Resume Incomplete<br/>Range: bytes=0-5242879
-        App->>DS: Update bytesUploaded = 5242880
-    end
-
-    App->>GD: PUT session_uri<br/>Content-Range: bytes N-last/total<br/>Body: [final chunk]
-    GD-->>App: 200 OK<br/>Body: {id: "drive_file_id"}
-
-    App->>DS: Clear saved session
-
-    Note over App: --- App killed mid-upload, WorkManager retries ---
-
-    App->>DS: Load saved session
-    DS-->>App: Session (URI, file, bytesUploaded, folder, timestamp)
-
-    App->>App: Validate: not expired, same folder, file exists, size matches
-
-    App->>GD: PUT session_uri<br/>Content-Range: bytes */total<br/>Body: (empty)
-    GD-->>App: 308 Resume Incomplete<br/>Range: bytes=0-15728639
-
-    Note over App: Resume from byte 15728640
-
-    App->>GD: PUT session_uri<br/>Content-Range: bytes 15728640-.../total<br/>Body: [next chunk]
-    GD-->>App: 308 Resume Incomplete
-
-    Note over App: Continue until final chunk...
-
-    App->>GD: PUT session_uri<br/>Content-Range: bytes N-last/total<br/>Body: [final chunk]
-    GD-->>App: 200 OK {id: "drive_file_id"}
-
-    App->>DS: Clear saved session
-```
-
-## Build Requirements
-
-- **JDK**: Temurin JDK 20 (GraalCE 21 causes `jlink` errors with Android builds)
-- **Gradle**: 8.11.1+ (wrapper included)
-- **Android Gradle Plugin**: 8.13.2
-- **Android SDK**: Compile SDK 35, Min SDK 26 (Android 8.0+)
-- **Kotlin**: 2.0.21
-
-The JDK path is configured in `gradle.properties` via `org.gradle.java.home`. Adjust this to your local JDK installation path.
-
-## Setup
-
-### 1. Google Cloud Project
-
-The app requires a Google Cloud project with the Google Drive API enabled and an OAuth 2.0 client ID configured for Android.
-
-1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
-2. Create a new project (or use an existing one).
-3. Enable the **Google Drive API** under APIs & Services.
-4. Create an **OAuth 2.0 Client ID** of type "Android":
-   - Set the package name to `com.johnsonyuen.signalbackup`.
-   - Provide the SHA-1 fingerprint of your signing certificate.
-5. Download the client configuration JSON (used by the Google API client).
-
-### 2. Local Development
-
-1. Clone the repository.
-2. Ensure Temurin JDK 20 is installed and update `org.gradle.java.home` in `gradle.properties` to point to your JDK path.
-3. Open the project in Android Studio.
-4. Build and run the `debug` variant -- it uses the default debug keystore automatically.
-
-### 3. Release Signing
-
-Release builds read signing credentials from environment variables so secrets are never committed to version control:
-
-| Environment Variable | Description |
+| Area | Library (version from `gradle/libs.versions.toml`) |
 |---|---|
-| `KEYSTORE_FILE` | Path to the `.jks` or `.keystore` file |
-| `KEYSTORE_PASSWORD` | Password for the keystore |
-| `KEY_ALIAS` | Alias of the signing key |
-| `KEY_PASSWORD` | Password for the key alias |
-
-If these variables are not set, the release signing config is skipped (the build still compiles but produces an unsigned APK).
-
-### 4. CI/CD
-
-GitHub Actions workflows are provided in `.github/workflows/`:
-
-- **`build.yml`** -- Runs on push/PR to `main`. Builds the debug APK, runs lint, and uploads the APK as a build artifact.
-- **`release.yml`** -- Triggered by pushing a `v*` tag. Builds a signed release APK and creates a GitHub Release with the APK attached.
-
-The release workflow expects the following GitHub Secrets:
-
-| Secret | Description |
-|---|---|
-| `KEYSTORE_BASE64` | Base64-encoded keystore file |
-| `KEYSTORE_PASSWORD` | Keystore password |
-| `KEY_ALIAS` | Signing key alias |
-| `KEY_PASSWORD` | Signing key password |
-
-## Project Structure
-
-```
-app/src/main/java/com/johnsonyuen/signalbackup/
-  data/
-    local/
-      datastore/          DataStore preferences (SettingsDataStore)
-      db/                 Room database (AppDatabase, UploadHistoryDao)
-      entity/             Room entities and mappers
-    remote/               Google Drive API wrapper (GoogleDriveService)
-    repository/           Repository interfaces and implementations
-  di/                     Hilt modules (AppModule, DriveModule, RepositoryModule)
-  domain/
-    model/                Domain models (UploadStatus, UploadProgress, DriveFolder, etc.)
-    usecase/              Business logic (PerformUploadUseCase, ScheduleUploadUseCase, ManualUploadUseCase)
-  ui/
-    component/            Reusable Compose components (StatusCard, UploadProgressCard, DriveFolderPickerDialog, etc.)
-    navigation/           Navigation graph and routes
-    screen/               Screen composables and ViewModels (Home, History, Settings)
-    theme/                Material 3 theme configuration (colors, typography)
-  util/                   Shared utilities (FormatUtils)
-  worker/                 WorkManager workers (UploadWorker)
-```
+| Build | AGP 9.4.0 (built-in Kotlin), Kotlin 2.4.21, KSP 2.3.11, Gradle 9.8.1 |
+| UI | Jetpack Compose (BOM 2026.09.00), Material 3, Navigation Compose 2.10.2 |
+| DI | Hilt 2.60.1, AndroidX Hilt 1.4.0 |
+| Background | WorkManager 2.12.0 |
+| Storage | Room 2.8.5 (schema v5) |
+| Drive | google-api-client-android 2.9.1, google-api-services-drive v3-rev20261011-2.0.0 |
+| Auth | Credential Manager 1.6.0 + googleid 1.2.1 (sign-in), play-services-auth 21.6.0 `AuthorizationClient` (Drive scope) |
+| Files | AndroidX DocumentFile 1.1.0 / SAF |
+| Async | Kotlin Coroutines 1.11.0, kotlinx.serialization 1.11.0 |
+| Tests | JUnit 4.13.2, MockK 1.14.11, Turbine 1.2.1, Robolectric 4.17, work-testing, room-testing |
 
 ## License
 
-This project is for personal use.
+There is no licence file yet; the owner hasn't chosen a licence.

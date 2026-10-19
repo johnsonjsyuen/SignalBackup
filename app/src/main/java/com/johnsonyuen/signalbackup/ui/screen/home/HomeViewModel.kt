@@ -1,408 +1,298 @@
-/**
- * HomeViewModel.kt - ViewModel for the Home screen, managing upload state and settings.
- *
- * This ViewModel is the bridge between the Home screen UI and the app's business logic.
- * It exposes:
- * - The current upload status (idle, uploading, success, failed, needs consent).
- * - Upload progress data (bytes, speed, ETA) during active uploads.
- * - Several user settings (email, schedule, folders) as reactive StateFlows.
- * - Action functions that the UI can call (upload now, set email, report errors).
- *
- * State management pattern:
- * - **MutableStateFlow + asStateFlow()** for the upload status, which is driven by
- *   observing WorkManager's WorkInfo state for manual uploads.
- * - **Flow.stateIn()** for settings values, which are read reactively from DataStore.
- *   `SharingStarted.WhileSubscribed(5000)` keeps the Flow active for 5 seconds after
- *   the last collector disappears, preventing unnecessary restarts during configuration
- *   changes (like screen rotation).
- *
- * Manual upload flow (triggered by uploadNow()):
- * 1. Enqueue a OneTimeWorkRequest via WorkManager through ManualUploadUseCase.
- * 2. WorkManager promotes the worker to a foreground service (shows notification).
- * 3. The worker acquires a WiFi lock, executes the upload, and releases the lock.
- * 4. This ViewModel observes the WorkInfo LiveData and maps it to UploadStatus.
- * 5. Because the upload runs in WorkManager (not viewModelScope), it survives the
- *    Activity going to background, process death, and even device reboots.
- *
- * Progress reporting:
- * - While the worker is RUNNING, WorkInfo.progress contains serialized UploadProgress data.
- * - The ViewModel extracts this into a StateFlow<UploadProgress?> for the UI to display.
- * - Progress is cleared (set to null) when the upload finishes or is not in progress.
- *
- * Key Android/Compose concepts:
- * - **@HiltViewModel**: Tells Hilt to create this ViewModel and inject its constructor
- *   dependencies. Compose accesses it via `hiltViewModel()`.
- * - **@ApplicationContext**: Injects the Application context (not Activity context).
- *   This is safe because ViewModels outlive Activities -- holding an Activity context
- *   would cause a memory leak.
- * - **viewModelScope.launch**: Launches a coroutine tied to the ViewModel's lifecycle.
- *   The coroutine is automatically cancelled when the ViewModel is cleared.
- *
- * @see domain.usecase.ManualUploadUseCase for enqueuing the upload via WorkManager
- * @see domain.usecase.PerformUploadUseCase for the actual upload logic inside the worker
- * @see worker.UploadWorker for the WorkManager worker that executes uploads
- * @see ui.screen.home.HomeScreen for the UI that observes this ViewModel
- */
 package com.johnsonyuen.signalbackup.ui.screen.home
 
-import android.content.Context
-import android.util.Log
+import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.work.WorkInfo
-import androidx.work.WorkManager
+import com.johnsonyuen.signalbackup.R
 import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
-import com.johnsonyuen.signalbackup.domain.model.UploadProgress
-import com.johnsonyuen.signalbackup.domain.model.UploadStatus
-import com.johnsonyuen.signalbackup.domain.model.GcUiState
+import com.johnsonyuen.signalbackup.data.repository.UploadHistoryRepository
+import com.johnsonyuen.signalbackup.domain.model.AppSettings
+import com.johnsonyuen.signalbackup.domain.model.FailureReason
+import com.johnsonyuen.signalbackup.domain.model.GcScanResult
+import com.johnsonyuen.signalbackup.domain.model.NeedsConsentException
+import com.johnsonyuen.signalbackup.domain.model.UploadRecord
+import com.johnsonyuen.signalbackup.domain.scheduling.UploadRunState
+import com.johnsonyuen.signalbackup.domain.scheduling.UploadScheduler
 import com.johnsonyuen.signalbackup.domain.usecase.GarbageCollectUseCase
 import com.johnsonyuen.signalbackup.domain.usecase.ManualUploadUseCase
-import com.johnsonyuen.signalbackup.domain.usecase.ScheduleRetryUseCase
-import com.johnsonyuen.signalbackup.receiver.UploadAlarmReceiver
-import com.johnsonyuen.signalbackup.worker.UploadWorker
+import com.johnsonyuen.signalbackup.ui.common.LocalFolderAccess
+import com.johnsonyuen.signalbackup.ui.common.LocalFolderInfo
+import com.johnsonyuen.signalbackup.ui.common.MinuteTicker
+import com.johnsonyuen.signalbackup.ui.common.UiText
+import com.johnsonyuen.signalbackup.ui.consent.AuthorizationStart
+import com.johnsonyuen.signalbackup.ui.consent.ConsentAction
+import com.johnsonyuen.signalbackup.ui.consent.DriveAuthorizationFlow
+import com.johnsonyuen.signalbackup.ui.navigation.FixAction
+import com.johnsonyuen.signalbackup.ui.navigation.FixActionBus
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.transformLatest
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import com.google.api.client.googleapis.extensions.android.gms.auth.UserRecoverableAuthIOException
 import javax.inject.Inject
 
-/**
- * ViewModel for the Home screen.
- *
- * @param manualUploadUseCase Enqueues the upload as WorkManager work (survives backgrounding).
- * @param settingsRepository Provides reactive access to user preferences.
- * @param workManager WorkManager instance for observing manual upload work status.
- * @param appContext Application context, safe to hold in a ViewModel.
- */
+/** Home screen: current run, last result, setup checklist, consent and Clean Up. */
+@OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class HomeViewModel @Inject constructor(
-    private val manualUploadUseCase: ManualUploadUseCase,
-    private val scheduleRetryUseCase: ScheduleRetryUseCase,
-    private val garbageCollectUseCase: GarbageCollectUseCase,
     private val settingsRepository: SettingsRepository,
-    private val workManager: WorkManager,
-    @ApplicationContext private val appContext: Context
+    historyRepository: UploadHistoryRepository,
+    private val uploadScheduler: UploadScheduler,
+    private val manualUpload: ManualUploadUseCase,
+    private val garbageCollect: GarbageCollectUseCase,
+    private val authorizationFlow: DriveAuthorizationFlow,
+    private val localFolderAccess: LocalFolderAccess,
+    private val fixActionBus: FixActionBus,
+    ticker: MinuteTicker,
 ) : ViewModel() {
 
-    // -----------------------------------------------------------------------
-    // Upload status -- driven by observing WorkManager's WorkInfo state.
-    // -----------------------------------------------------------------------
+    private data class LocalState(
+        val authorizing: Boolean = false,
+        val authorizedThisSession: Boolean = false,
+        val cleanUp: CleanUpState = CleanUpState.Hidden,
+    )
 
-    /** Mutable backing field for the upload status. Only this ViewModel can write to it. */
-    private val _uploadStatus = MutableStateFlow<UploadStatus>(UploadStatus.Idle)
+    private val local = MutableStateFlow(LocalState())
+    private val folderRefresh = MutableStateFlow(0)
+    private val _events = Channel<HomeEvent>(Channel.BUFFERED)
 
-    /** Public read-only upload status observed by the Home screen UI. */
-    val uploadStatus: StateFlow<UploadStatus> = _uploadStatus.asStateFlow()
+    /** One-shot events (consent launch, messages). */
+    val events: Flow<HomeEvent> = _events.receiveAsFlow()
 
-    // -----------------------------------------------------------------------
-    // Upload progress -- collected directly from UploadWorker's static flow.
-    // -----------------------------------------------------------------------
+    private var pendingConsentAction: ConsentAction? = null
+    private var scanJob: Job? = null
 
-    /**
-     * Upload progress observed by the Home screen UI.
-     *
-     * Backed by an explicit collection from UploadWorker's static companion flow into
-     * a local MutableStateFlow. This ensures every emission is relayed with logging,
-     * making it easy to diagnose whether progress updates are reaching the ViewModel.
-     */
-    private val _uploadProgress = MutableStateFlow<UploadProgress?>(null)
-    val uploadProgress: StateFlow<UploadProgress?> = _uploadProgress.asStateFlow()
+    private val folderInfo: Flow<LocalFolderInfo?> =
+        combine(
+            settingsRepository.settings.map { it.localFolderUri }.distinctUntilChanged(),
+            folderRefresh,
+        ) { uri, _ -> uri }
+            .transformLatest { uri -> emit(uri?.let { localFolderAccess.inspect(it) }) }
+            .onStart { emit(null) }
 
-    // -----------------------------------------------------------------------
-    // Garbage collection state -- tracks scanning, confirming, and deleting.
-    // -----------------------------------------------------------------------
+    private val historyFlow: Flow<Pair<UploadRecord?, UploadRecord?>> =
+        combine(historyRepository.getLatest(), historyRepository.getLatestSuccess()) { a, b -> a to b }
 
-    private val _gcState = MutableStateFlow<GcUiState>(GcUiState.Idle)
-    val gcState: StateFlow<GcUiState> = _gcState.asStateFlow()
+    private val runFlow: Flow<Pair<UploadRunState, Long?>> =
+        combine(
+            uploadScheduler.observeRunState(),
+            uploadScheduler.observeNextScheduledRunMillis(),
+        ) { run, next -> run to next }
+
+    val uiState: StateFlow<HomeUiState> = combine(
+        settingsRepository.settings,
+        historyFlow,
+        runFlow,
+        combine(folderInfo, ticker.ticks()) { info, now -> info to now },
+        local,
+    ) { settings, (latest, latestSuccess), (run, nextRun), (info, now), localState ->
+        buildState(settings, latest, latestSuccess, run, nextRun, info, now, localState)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HomeUiState())
 
     init {
-        // Observe the manual upload work status and map it to our UploadStatus.
-        // This survives Activity recreation and picks up in-progress uploads.
-        observeManualUploadWork()
-        observeScheduledUploadWork()
-        observeRetryUploadWork()
-
-        // Observe retry DataStore fields to show RetryScheduled status.
         viewModelScope.launch {
-            combine(
-                settingsRepository.retryAtMillis,
-                settingsRepository.retryError
-            ) { retryAt, retryError ->
-                if (retryAt != null && retryError != null && retryAt > System.currentTimeMillis()) {
-                    UploadStatus.RetryScheduled(retryError, retryAt)
-                } else {
-                    null
-                }
-            }.collect { retryStatus ->
-                if (retryStatus != null && _uploadStatus.value !is UploadStatus.Uploading) {
-                    _uploadStatus.value = retryStatus
-                }
-            }
-        }
-
-        // Explicitly collect progress from the UploadWorker's static flow.
-        // Using an explicit collect (instead of stateIn) so we can log each emission
-        // to diagnose whether progress updates flow through correctly.
-        viewModelScope.launch {
-            UploadWorker.progressFlow.collect { progress ->
-                Log.d(TAG, "ViewModel received progress: ${progress?.bytesUploaded} / ${progress?.totalBytes}")
-                _uploadProgress.value = progress
+            fixActionBus.pending.filter { it == FixAction.CONSENT }.collect {
+                if (fixActionBus.consume(FixAction.CONSENT)) authorize(ConsentAction.UPLOAD)
             }
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Settings flows -- read reactively from DataStore via the repository.
-    // WhileSubscribed(5000) keeps the flow alive for 5s after the last collector
-    // disconnects, avoiding restarts during quick config changes.
-    // -----------------------------------------------------------------------
+    private fun buildState(
+        settings: AppSettings,
+        latest: UploadRecord?,
+        latestSuccess: UploadRecord?,
+        run: UploadRunState,
+        nextRun: Long?,
+        info: LocalFolderInfo?,
+        now: Long,
+        localState: LocalState,
+    ): HomeUiState {
+        val signedIn = settings.googleAccountEmail != null
+        val consentMissing = latest?.failureReason == FailureReason.NEEDS_CONSENT &&
+            !localState.authorizedThisSession
+        val folderSet = settings.localFolderUri != null
+        return HomeUiState(
+            loading = false,
+            accountEmail = settings.googleAccountEmail,
+            driveFolderName = settings.driveFolderName,
+            setup = SetupChecklist(
+                signedIn = signedIn,
+                driveAuthorized = signedIn && settings.driveFolderId != null && !consentMissing,
+                localFolderSet = folderSet,
+                localFolderName = if (folderSet) info?.name else null,
+                localFolderAccessible = !folderSet || info == null || info.accessible,
+                localFolderHasBackups = if (folderSet) info?.hasSignalBackups else null,
+            ),
+            run = run,
+            lastResult = latest?.toLastResultUi(),
+            lastSuccessMillis = latestSuccess?.timestamp?.toEpochMilli(),
+            nowMillis = now,
+            nextRunMillis = if (settings.scheduleEnabled) nextRun else null,
+            scheduleEnabled = settings.scheduleEnabled,
+            authorizing = localState.authorizing,
+            cleanUp = localState.cleanUp,
+        )
+    }
 
-    /** The signed-in Google account email, or null if not signed in. */
-    val googleAccountEmail: StateFlow<String?> = settingsRepository.googleAccountEmail
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+    /** Re-reads the local folder (e.g. when the screen resumes). */
+    fun refreshLocalFolder() {
+        folderRefresh.update { it + 1 }
+    }
 
-    /** The scheduled upload hour (0-23). Defaults to 3 (3:00 AM). */
-    val scheduleHour: StateFlow<Int> = settingsRepository.scheduleHour
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 3)
-
-    /** The scheduled upload minute (0-59). Defaults to 0. */
-    val scheduleMinute: StateFlow<Int> = settingsRepository.scheduleMinute
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
-
-    /** The SAF URI of the selected local backup folder, or null if not set. */
-    val localFolderUri: StateFlow<String?> = settingsRepository.localFolderUri
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
-
-    /** The display name of the selected Drive destination folder, or null. */
-    val driveFolderName: StateFlow<String?> = settingsRepository.driveFolderName
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
-
-    /**
-     * Initiates an upload of the latest Signal backup to Google Drive.
-     *
-     * Delegates to [ManualUploadUseCase] which enqueues a OneTimeWorkRequest through
-     * WorkManager. This ensures the upload runs as a foreground service that survives
-     * the Activity going to background.
-     *
-     * The work request uses EXPEDITED priority so it starts immediately and promotes
-     * the worker to a foreground service on Android 12+. The worker acquires a WiFi lock
-     * to prevent network drops during large uploads.
-     *
-     * The ViewModel observes the work status via [observeManualUploadWork] and updates
-     * [uploadStatus] accordingly.
-     */
     fun uploadNow() {
-        _uploadStatus.value = UploadStatus.Uploading
-        viewModelScope.launch {
-            manualUploadUseCase()
-            Log.d(TAG, "Manual upload work enqueued via ManualUploadUseCase")
-        }
+        if (!uiState.value.canUploadNow) return
+        viewModelScope.launch { manualUpload() }
     }
 
-    /**
-     * Observes WorkManager's work status for the manual upload and maps it to UploadStatus.
-     * Also extracts progress data from WorkInfo.progress when the worker is RUNNING.
-     *
-     * WorkManager provides a LiveData<List<WorkInfo>> for each unique work name. We convert
-     * it to a Flow and collect it in viewModelScope. The mapping is:
-     * - ENQUEUED/BLOCKED -> Uploading (waiting to start)
-     * - RUNNING -> Uploading (actively uploading) + extract progress data
-     * - SUCCEEDED -> Success (upload complete)
-     * - FAILED/CANCELLED -> Failed
-     *
-     * Note: WorkInfo does not carry the detailed UploadStatus (file name, size, error message)
-     * because WorkManager's output data is limited. For detailed status after completion,
-     * the user can check the upload history screen.
-     */
-    private fun observeManualUploadWork() {
-        viewModelScope.launch {
-            workManager.getWorkInfosForUniqueWorkFlow(ManualUploadUseCase.WORK_NAME)
-                .collect { workInfos ->
-                    // getWorkInfosForUniqueWork returns a list, but we only ever have one
-                    // work request for this unique name (KEEP policy). Take the first.
-                    val workInfo = workInfos.firstOrNull() ?: return@collect
-                    _uploadStatus.value = mapWorkInfoToStatus(workInfo)
-                }
-        }
-    }
-
-    /**
-     * Observes WorkManager's work status for scheduled uploads and maps it to UploadStatus.
-     *
-     * This mirrors [observeManualUploadWork] but tracks the scheduled upload work enqueued
-     * by UploadAlarmReceiver. This ensures the Home screen UI reflects the status of
-     * scheduled uploads (e.g., showing "Uploading" or "Success") just like manual ones.
-     */
-    private fun observeScheduledUploadWork() {
-        viewModelScope.launch {
-            workManager.getWorkInfosForUniqueWorkFlow(SCHEDULED_WORK_NAME)
-                .collect { workInfos ->
-                    val workInfo = workInfos.firstOrNull() ?: return@collect
-                    _uploadStatus.value = mapWorkInfoToStatus(workInfo)
-                }
-        }
-    }
-
-    private fun observeRetryUploadWork() {
-        viewModelScope.launch {
-            workManager.getWorkInfosForUniqueWorkFlow(ScheduleRetryUseCase.WORK_NAME)
-                .collect { workInfos ->
-                    val workInfo = workInfos.firstOrNull() ?: return@collect
-                    // Skip ENQUEUED/BLOCKED — retry work sits in ENQUEUED for 30 min
-                    // with an initial delay. The combine flow handles the countdown UI.
-                    // Only react when the retry actually starts running or finishes.
-                    if (workInfo.state == WorkInfo.State.ENQUEUED ||
-                        workInfo.state == WorkInfo.State.BLOCKED) return@collect
-                    _uploadStatus.value = mapWorkInfoToStatus(workInfo)
-                }
-        }
-    }
-
-    /**
-     * Maps a [WorkInfo] to the corresponding [UploadStatus].
-     *
-     * This is the single source of truth for converting WorkManager states to the
-     * UI-facing upload status, used by both manual and scheduled upload observers.
-     *
-     * Mapping:
-     * - ENQUEUED, BLOCKED, RUNNING -> [UploadStatus.Uploading]
-     * - SUCCEEDED -> [UploadStatus.Success] with file name and size from output data
-     * - FAILED -> [UploadStatus.Failed] with a generic failure message
-     * - CANCELLED -> [UploadStatus.Failed] with a cancellation message
-     */
-    private fun mapWorkInfoToStatus(workInfo: WorkInfo): UploadStatus {
-        return when (workInfo.state) {
-            WorkInfo.State.ENQUEUED,
-            WorkInfo.State.BLOCKED,
-            WorkInfo.State.RUNNING -> UploadStatus.Uploading
-
-            WorkInfo.State.SUCCEEDED -> UploadStatus.Success(
-                fileName = workInfo.outputData.getString(UploadWorker.KEY_OUTPUT_FILE_NAME)
-                    ?: "Backup uploaded",
-                fileSizeBytes = workInfo.outputData.getLong(UploadWorker.KEY_OUTPUT_FILE_SIZE, 0)
-            )
-
-            WorkInfo.State.FAILED -> UploadStatus.Failed(
-                "Upload failed. Check history for details."
-            )
-
-            WorkInfo.State.CANCELLED -> UploadStatus.Failed(
-                "Upload was cancelled"
-            )
-        }
-    }
-
-    /**
-     * Cancels the currently running manual upload.
-     *
-     * Cancels the WorkManager work by unique name, then immediately resets the UI state
-     * to Idle. WorkManager will also emit a CANCELLED WorkInfo, but we set Idle here for
-     * instant UI feedback rather than waiting for the WorkInfo observer to fire.
-     */
     fun cancelUpload() {
-        workManager.cancelUniqueWork(ManualUploadUseCase.WORK_NAME)
-        workManager.cancelUniqueWork(UploadAlarmReceiver.WORK_NAME)
-        viewModelScope.launch { scheduleRetryUseCase.cancel() }
-        _uploadStatus.value = UploadStatus.Idle
-        Log.d(TAG, "Upload cancelled by user")
+        uploadScheduler.cancelRunningUploads()
     }
 
-    /**
-     * Called by the UI to set an explicit failure status (e.g., when the user
-     * denies the Drive consent dialog).
-     */
-    fun setUploadFailed(message: String) {
-        _uploadStatus.value = UploadStatus.Failed(message)
-    }
-
-    /**
-     * Persists the Google account email to DataStore after a successful sign-in.
-     * This email is later used by GoogleDriveService to authenticate API calls.
-     */
-    fun setGoogleAccountEmail(email: String) {
+    /** Called after Credential Manager sign-in succeeds. */
+    fun onSignedIn(email: String) {
         viewModelScope.launch {
             settingsRepository.setGoogleAccountEmail(email)
+            authorize(ConsentAction.RESOLVE_FOLDER)
         }
     }
 
-    /**
-     * Scans the configured Drive folder for old backup files.
-     *
-     * Queries the Drive API for all files in the folder, identifies the latest
-     * backup, and sets the GC state to [GcUiState.Confirm] with the files to delete.
-     * If only 0 or 1 files exist, sets [GcUiState.NothingToDelete].
-     */
-    fun startGarbageCollect() {
-        _gcState.value = GcUiState.Scanning
+    /** Starts Drive authorization for the setup checklist. */
+    fun grantDriveAccess() {
+        viewModelScope.launch { authorize(ConsentAction.RESOLVE_FOLDER) }
+    }
+
+    /** Runs the fix offered on the last-result card (sign-in and folder choice are handled by the screen). */
+    fun onFix(fix: ResultFix) {
+        when (fix) {
+            ResultFix.GRANT_ACCESS, ResultFix.FIX_DRIVE_FOLDER ->
+                viewModelScope.launch { authorize(ConsentAction.UPLOAD) }
+            ResultFix.RETRY -> uploadNow()
+            ResultFix.CLEAN_UP -> openCleanUp()
+            ResultFix.SIGN_IN, ResultFix.CHOOSE_FOLDER -> Unit
+        }
+    }
+
+    private suspend fun authorize(action: ConsentAction) {
+        if (local.value.authorizing) return
+        local.update { it.copy(authorizing = true) }
+        when (val start = authorizationFlow.start()) {
+            is AuthorizationStart.Authorized -> {
+                local.update { it.copy(authorizing = false, authorizedThisSession = true) }
+                start.message?.let { _events.send(HomeEvent.ShowMessage(it)) }
+                resume(action)
+            }
+            is AuthorizationStart.NeedsUi -> {
+                pendingConsentAction = action
+                _events.send(HomeEvent.LaunchConsent(start.pendingIntent, action))
+            }
+            is AuthorizationStart.Failed -> {
+                local.update { it.copy(authorizing = false) }
+                _events.send(HomeEvent.ShowMessage(start.message))
+            }
+        }
+    }
+
+    /** Result of the consent screen; resumes the action that needed consent. */
+    fun onConsentResult(data: Intent?) {
+        val resumeAction = pendingConsentAction ?: ConsentAction.RESOLVE_FOLDER
+        pendingConsentAction = null
         viewModelScope.launch {
+            val result = authorizationFlow.complete(data)
+            local.update {
+                it.copy(authorizing = false, authorizedThisSession = it.authorizedThisSession || result.granted)
+            }
+            result.message?.let { _events.send(HomeEvent.ShowMessage(it)) }
+            if (result.granted) resume(resumeAction)
+        }
+    }
+
+    /** The consent screen could not be launched. */
+    fun onConsentLaunchFailed() {
+        pendingConsentAction = null
+        local.update { it.copy(authorizing = false) }
+        viewModelScope.launch {
+            _events.send(HomeEvent.ShowMessage(UiText.Res(R.string.error_consent_launch)))
+        }
+    }
+
+    private suspend fun resume(action: ConsentAction) {
+        when (action) {
+            ConsentAction.UPLOAD -> manualUpload()
+            ConsentAction.CLEAN_UP -> openCleanUp()
+            ConsentAction.RESOLVE_FOLDER, ConsentAction.FOLDER_PICKER -> Unit
+        }
+    }
+
+    fun onSignInError(message: UiText) {
+        viewModelScope.launch { _events.send(HomeEvent.ShowMessage(message)) }
+    }
+
+    // --- Clean Up ---
+
+    fun openCleanUp() {
+        scanJob?.cancel()
+        setCleanUp(CleanUpState.Scanning)
+        scanJob = viewModelScope.launch {
             try {
-                val result = garbageCollectUseCase.scanOldBackups()
-                if (result == null) {
-                    _gcState.value = GcUiState.NothingToDelete
-                } else {
-                    _gcState.value = GcUiState.Confirm(
-                        latestFile = result.latestFile,
-                        filesToDelete = result.oldFiles,
-                    )
+                val next = when (val result = garbageCollect.scan()) {
+                    GcScanResult.NothingToClean -> CleanUpState.NothingToClean
+                    is GcScanResult.Blocked -> CleanUpState.Blocked(result.message)
+                    is GcScanResult.Ready ->
+                        if (result.toTrash.isEmpty()) CleanUpState.NothingToClean
+                        else CleanUpState.Ready(result.kept, result.toTrash)
                 }
-            } catch (e: UserRecoverableAuthIOException) {
-                Log.w(TAG, "GC scan needs consent", e)
-                _gcState.value = GcUiState.Idle
-                _uploadStatus.value = UploadStatus.NeedsConsent(e.intent)
+                setCleanUp(next)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: NeedsConsentException) {
+                setCleanUp(CleanUpState.Hidden)
+                authorize(ConsentAction.CLEAN_UP)
             } catch (e: Exception) {
-                Log.e(TAG, "GC scan failed", e)
-                _gcState.value = GcUiState.Error(e.message ?: "Failed to scan Drive folder")
+                setCleanUp(CleanUpState.Error(DriveAuthorizationFlow.errorText(e)))
             }
         }
     }
 
-    /**
-     * Confirms deletion of old backups after user approval.
-     *
-     * Deletes all files in the current [GcUiState.Confirm] state and transitions
-     * to [GcUiState.Done] with the count and total freed bytes.
-     */
-    fun confirmGarbageCollect() {
-        val currentState = _gcState.value
-        if (currentState !is GcUiState.Confirm) return
-
-        val filesToDelete = currentState.filesToDelete
-        val freedBytes = filesToDelete.sumOf { it.sizeBytes }
-
-        _gcState.value = GcUiState.Deleting
+    fun confirmCleanUp() {
+        val ready = local.value.cleanUp as? CleanUpState.Ready ?: return
+        setCleanUp(CleanUpState.Trashing(ready.toTrash.size))
         viewModelScope.launch {
             try {
-                garbageCollectUseCase.deleteFiles(filesToDelete.map { it.id })
-                _gcState.value = GcUiState.Done(
-                    deletedCount = filesToDelete.size,
-                    freedBytes = freedBytes,
-                )
-            } catch (e: UserRecoverableAuthIOException) {
-                Log.w(TAG, "GC delete needs consent", e)
-                _gcState.value = GcUiState.Idle
-                _uploadStatus.value = UploadStatus.NeedsConsent(e.intent)
+                setCleanUp(CleanUpState.Done(garbageCollect.trash(ready.toTrash)))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: NeedsConsentException) {
+                setCleanUp(CleanUpState.Hidden)
+                authorize(ConsentAction.CLEAN_UP)
             } catch (e: Exception) {
-                Log.e(TAG, "GC delete failed", e)
-                _gcState.value = GcUiState.Error(e.message ?: "Failed to delete files")
+                setCleanUp(CleanUpState.Error(DriveAuthorizationFlow.errorText(e)))
             }
         }
     }
 
-    /**
-     * Dismisses the current GC dialog/state, returning to idle.
-     */
-    fun dismissGarbageCollect() {
-        _gcState.value = GcUiState.Idle
+    /** Closes the dialog and cancels a running scan. Ignored while items are being trashed. */
+    fun dismissCleanUp() {
+        if (local.value.cleanUp is CleanUpState.Trashing) return
+        scanJob?.cancel()
+        scanJob = null
+        setCleanUp(CleanUpState.Hidden)
     }
 
-    companion object {
-        private const val TAG = "HomeViewModel"
-        private const val SCHEDULED_WORK_NAME = UploadAlarmReceiver.WORK_NAME
+    private fun setCleanUp(state: CleanUpState) {
+        local.update { it.copy(cleanUp = state) }
     }
 }

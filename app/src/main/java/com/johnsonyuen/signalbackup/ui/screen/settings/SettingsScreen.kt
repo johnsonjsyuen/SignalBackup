@@ -1,348 +1,376 @@
-/**
- * SettingsScreen.kt - The Settings screen for configuring app preferences.
- *
- * This screen provides the user interface for all app configuration:
- * - **Local Backup Folder**: Uses Android's Storage Access Framework (SAF) to let the
- *   user pick a directory where Signal stores its .backup files.
- * - **Google Drive Folder**: Opens a custom DriveFolderPickerDialog for browsing and
- *   selecting the Drive destination folder.
- * - **Upload Schedule**: Opens a TimePickerDialog for choosing the daily backup time.
- * - **Theme**: Opens a ThemeSelectionDialog with Light/Dark/System options.
- * - **Account**: Shows the signed-in Google email with a sign-out button.
- *
- * Key Android/Compose concepts:
- * - **ActivityResultContracts.OpenDocumentTree()**: Launches the system folder picker
- *   (SAF). Returns a content URI that can be used to read files in that directory.
- *   `takePersistableUriPermission` ensures the URI survives app restarts.
- * - **Scaffold with SnackbarHost**: The Scaffold provides a slot for a SnackbarHost,
- *   which displays error messages from Drive API calls (driveError state).
- * - **LaunchedEffect(driveError)**: Watches the driveError state and shows a snackbar
- *   whenever a new error occurs. After showing, clears the error in the ViewModel.
- * - **rememberScrollState() + verticalScroll()**: Makes the settings list scrollable
- *   if content exceeds the screen height.
- * - **collectAsStateWithLifecycle()**: Lifecycle-aware Flow collection for all settings.
- *
- * Dialog management:
- * Three boolean state variables (showTimePicker, showDrivePicker, showThemeDialog)
- * control which dialog is currently visible. Only one dialog can be open at a time
- * because the user must dismiss a dialog before interacting with the screen again.
- *
- * @see ui.screen.settings.SettingsViewModel for the state management
- * @see ui.component.DriveFolderPickerDialog for the Drive folder browser
- * @see ui.component.TimePickerDialog for the schedule time picker
- */
 package com.johnsonyuen.signalbackup.ui.screen.settings
 
-import android.app.AlarmManager
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.BatteryAlert
+import androidx.compose.material.icons.filled.BrightnessAuto
+import androidx.compose.material.icons.filled.CloudQueue
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.EventRepeat
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Hotel
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
+import androidx.core.content.PackageManagerCompat
+import androidx.core.content.UnusedAppRestrictionsConstants
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.johnsonyuen.signalbackup.BuildConfig
+import com.johnsonyuen.signalbackup.R
 import com.johnsonyuen.signalbackup.domain.model.ThemeMode
+import com.johnsonyuen.signalbackup.ui.common.labelRes
+import com.johnsonyuen.signalbackup.ui.common.resolve
 import com.johnsonyuen.signalbackup.ui.component.DriveFolderPickerDialog
+import com.johnsonyuen.signalbackup.ui.component.NoBackupsWarning
 import com.johnsonyuen.signalbackup.ui.component.TimePickerDialog
-import com.johnsonyuen.signalbackup.util.formatScheduleTime
+import com.johnsonyuen.signalbackup.util.formatTimeOfDay
+import kotlinx.coroutines.launch
 
-/**
- * The Settings screen composable.
- *
- * @param viewModel The Hilt-injected SettingsViewModel.
- */
+private const val TAG = "SettingsScreen"
+
 @Composable
 fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
-    // -----------------------------------------------------------------------
-    // Collect all ViewModel state flows as lifecycle-aware Compose State.
-    // -----------------------------------------------------------------------
-    val localFolderUri by viewModel.localFolderUri.collectAsStateWithLifecycle()
-    val driveFolderName by viewModel.driveFolderName.collectAsStateWithLifecycle()
-    val scheduleHour by viewModel.scheduleHour.collectAsStateWithLifecycle()
-    val scheduleMinute by viewModel.scheduleMinute.collectAsStateWithLifecycle()
-    val googleEmail by viewModel.googleAccountEmail.collectAsStateWithLifecycle()
-    val driveFolders by viewModel.driveFolders.collectAsStateWithLifecycle()
-    val isLoadingFolders by viewModel.isLoadingFolders.collectAsStateWithLifecycle()
-    val currentDriveFolder by viewModel.currentDriveFolder.collectAsStateWithLifecycle()
-    val currentDriveFolderName by viewModel.currentDriveFolderName.collectAsStateWithLifecycle()
-    val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
-    val wifiOnly by viewModel.wifiOnly.collectAsStateWithLifecycle()
-    val driveError by viewModel.driveError.collectAsStateWithLifecycle()
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Show Drive API errors as a snackbar, then clear the error.
-    LaunchedEffect(driveError) {
-        driveError?.let {
-            snackbarHostState.showSnackbar(it)
-            viewModel.clearDriveError()
+    var showTimePicker by rememberSaveable { mutableStateOf(false) }
+    var showThemeDialog by rememberSaveable { mutableStateOf(false) }
+    var showSignOutDialog by rememberSaveable { mutableStateOf(false) }
+
+    val consentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) { result -> viewModel.onConsentResult(result.data) }
+
+    LaunchedEffect(viewModel) {
+        viewModel.events.collect { event ->
+            when (event) {
+                is SettingsEvent.LaunchConsent -> try {
+                    consentLauncher.launch(IntentSenderRequest.Builder(event.pendingIntent).build())
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not launch consent screen: ${e.javaClass.simpleName}")
+                    viewModel.onConsentLaunchFailed()
+                }
+                is SettingsEvent.ShowMessage -> {
+                    val text = event.text.resolve(context)
+                    launch { snackbarHostState.showSnackbar(text) }
+                }
+            }
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Dialog visibility state -- local to this composable.
-    // -----------------------------------------------------------------------
-    var showTimePicker by remember { mutableStateOf(false) }
-    var showDrivePicker by remember { mutableStateOf(false) }
-    var showThemeDialog by remember { mutableStateOf(false) }
+    // Permission state, refreshed whenever the screen resumes.
+    var notificationsGranted by remember { mutableStateOf(true) }
+    var ignoringBatteryOptimizations by remember { mutableStateOf(true) }
+    var hibernationStatus by remember { mutableIntStateOf(UnusedAppRestrictionsConstants.FEATURE_NOT_AVAILABLE) }
+    var refreshPermissions by remember { mutableIntStateOf(0) }
 
-    // Permission state - re-checked when returning from system Settings
-    var canScheduleExactAlarms by remember { mutableStateOf(true) }
-    var isIgnoringBatteryOptimizations by remember { mutableStateOf(true) }
-
-    // Re-check permissions every time the screen resumes (e.g., returning from Settings)
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            canScheduleExactAlarms = alarmManager.canScheduleExactAlarms()
-        }
-        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-        isIgnoringBatteryOptimizations = powerManager.isIgnoringBatteryOptimizations(context.packageName)
+        viewModel.refreshLocalFolder()
+        refreshPermissions++
+    }
+    LaunchedEffect(refreshPermissions) {
+        notificationsGranted = hasNotificationPermission(context)
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        ignoringBatteryOptimizations = pm.isIgnoringBatteryOptimizations(context.packageName)
+        val future = PackageManagerCompat.getUnusedAppRestrictionsStatus(context)
+        future.addListener(
+            {
+                hibernationStatus = try {
+                    future.get()
+                } catch (e: Exception) {
+                    UnusedAppRestrictionsConstants.ERROR
+                }
+            },
+            ContextCompat.getMainExecutor(context),
+        )
     }
 
-    // -----------------------------------------------------------------------
-    // SAF folder picker launcher.
-    // OpenDocumentTree launches the system "choose directory" UI.
-    // On result, we take a persistable URI permission so the app can access
-    // the folder across reboots without re-asking the user.
-    // -----------------------------------------------------------------------
-    val folderPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        uri?.let {
-            // Take a persistable read permission so the URI survives app restarts.
-            context.contentResolver.takePersistableUriPermission(
-                it,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION
+    val notificationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        notificationsGranted = granted
+        if (!granted) {
+            // Permanently denied or dismissed: send the user to the app's notification settings.
+            context.startActivity(
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
             )
-            viewModel.setLocalFolderUri(it.toString())
+        }
+    }
+    val hibernationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { refreshPermissions++ }
+
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                viewModel.setLocalFolder(uri.toString())
+            } catch (e: SecurityException) {
+                Log.w(TAG, "Could not persist folder permission")
+            }
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Screen layout: Scaffold with snackbar + scrollable Column of settings cards.
-    // -----------------------------------------------------------------------
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        containerColor = MaterialTheme.colorScheme.background
+        containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
     ) { scaffoldPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())  // Scrollable for small screens.
-                .padding(scaffoldPadding)                // Respect scaffold insets.
-                .padding(16.dp),                         // Content padding.
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(scaffoldPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // --- Configuration section ---
-            Text("Configuration", style = MaterialTheme.typography.titleLarge)
+            SectionTitle(stringResource(R.string.settings_section_backup))
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Local backup folder card -- shows status and "Select" button.
-            Card(modifier = Modifier.fillMaxWidth()) {
+            SettingCard {
                 ListItem(
-                    headlineContent = { Text("Local Backup Folder") },
-                    supportingContent = { Text(localFolderUri?.let { "Folder selected" } ?: "Not set") },
+                    headlineContent = { Text(stringResource(R.string.settings_local_folder)) },
+                    supportingContent = {
+                        Column {
+                            Text(
+                                when {
+                                    !state.localFolderSet -> stringResource(R.string.not_set)
+                                    !state.localFolderAccessible -> stringResource(R.string.local_folder_inaccessible)
+                                    else -> state.localFolderName ?: stringResource(R.string.local_folder_selected)
+                                },
+                            )
+                            if (state.localFolderSet && state.localFolderAccessible && state.localFolderHasBackups == false) {
+                                NoBackupsWarning()
+                            }
+                        }
+                    },
                     leadingContent = { Icon(Icons.Default.Folder, contentDescription = null) },
                     trailingContent = {
                         TextButton(onClick = { folderPickerLauncher.launch(null) }) {
-                            Text("Select")
+                            Text(stringResource(R.string.action_select))
                         }
-                    }
+                    },
                 )
             }
 
-            // Google Drive folder card -- "Select" button disabled until signed in.
-            Card(modifier = Modifier.fillMaxWidth()) {
+            SettingCard {
                 ListItem(
-                    headlineContent = { Text("Google Drive Folder") },
-                    supportingContent = { Text(driveFolderName ?: "Not set") },
+                    headlineContent = { Text(stringResource(R.string.settings_drive_folder)) },
+                    supportingContent = { Text(state.driveFolderName ?: stringResource(R.string.not_set)) },
                     leadingContent = { Icon(Icons.Default.CloudQueue, contentDescription = null) },
                     trailingContent = {
-                        TextButton(
-                            onClick = {
-                                viewModel.loadDriveFolders()  // Load root-level folders.
-                                showDrivePicker = true
-                            },
-                            enabled = googleEmail != null  // Must be signed in first.
-                        ) {
-                            Text("Select")
+                        TextButton(onClick = viewModel::openDrivePicker, enabled = state.signedIn) {
+                            Text(stringResource(R.string.action_select))
                         }
-                    }
+                    },
                 )
             }
 
-            // Upload schedule card -- shows formatted time and "Change" button.
-            Card(modifier = Modifier.fillMaxWidth()) {
+            SettingCard {
                 ListItem(
-                    headlineContent = { Text("Upload Schedule") },
+                    headlineContent = { Text(stringResource(R.string.settings_schedule_enabled)) },
+                    supportingContent = { Text(stringResource(R.string.settings_schedule_enabled_detail)) },
+                    leadingContent = { Icon(Icons.Default.EventRepeat, contentDescription = null) },
+                    trailingContent = { Switch(checked = state.scheduleEnabled, onCheckedChange = null) },
+                    modifier = Modifier.toggleable(
+                        value = state.scheduleEnabled,
+                        role = Role.Switch,
+                        onValueChange = viewModel::setScheduleEnabled,
+                    ),
+                )
+            }
+
+            SettingCard {
+                ListItem(
+                    headlineContent = { Text(stringResource(R.string.settings_schedule_time)) },
                     supportingContent = {
-                        Text("Daily at ${formatScheduleTime(scheduleHour, scheduleMinute)}")
+                        Text(
+                            stringResource(
+                                R.string.settings_daily_at,
+                                formatTimeOfDay(context, state.scheduleHour, state.scheduleMinute),
+                            ),
+                        )
                     },
                     leadingContent = { Icon(Icons.Default.Schedule, contentDescription = null) },
                     trailingContent = {
-                        TextButton(onClick = { showTimePicker = true }) {
-                            Text("Change")
+                        TextButton(onClick = { showTimePicker = true }, enabled = state.scheduleEnabled) {
+                            Text(stringResource(R.string.action_change))
                         }
-                    }
-                )
-            }
-
-            // Wi-Fi only toggle -- restricts uploads to unmetered networks.
-            Card(modifier = Modifier.fillMaxWidth()) {
-                ListItem(
-                    headlineContent = { Text("Wi-Fi only") },
-                    supportingContent = { Text("Only upload when connected to Wi-Fi") },
-                    leadingContent = { Icon(Icons.Default.Wifi, contentDescription = null) },
-                    trailingContent = {
-                        Switch(
-                            checked = wifiOnly,
-                            onCheckedChange = { viewModel.setWifiOnly(it) }
-                        )
-                    }
-                )
-            }
-
-            // Warning: Exact alarm permission not granted
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !canScheduleExactAlarms) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer
-                    )
-                ) {
-                    ListItem(
-                        headlineContent = { Text("Exact alarm permission required") },
-                        supportingContent = { Text("Scheduled backups need permission to fire at the exact time.") },
-                        leadingContent = {
-                            Icon(
-                                Icons.Default.Warning,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                        },
-                        trailingContent = {
-                            TextButton(onClick = {
-                                context.startActivity(
-                                    Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
-                                        data = Uri.parse("package:${context.packageName}")
-                                    }
-                                )
-                            }) {
-                                Text("Grant")
-                            }
-                        }
-                    )
-                }
-            }
-
-            // Warning: Battery optimization active
-            if (!isIgnoringBatteryOptimizations) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer
-                    )
-                ) {
-                    ListItem(
-                        headlineContent = { Text("Battery optimization active") },
-                        supportingContent = { Text("Disable battery optimization so scheduled backups are not killed.") },
-                        leadingContent = {
-                            Icon(
-                                Icons.Default.Warning,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                        },
-                        trailingContent = {
-                            TextButton(onClick = {
-                                context.startActivity(
-                                    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                                        data = Uri.parse("package:${context.packageName}")
-                                    }
-                                )
-                            }) {
-                                Text("Disable")
-                            }
-                        }
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // --- Appearance section ---
-            Text("Appearance", style = MaterialTheme.typography.titleLarge)
-
-            // Theme card -- shows current mode with a contextual icon.
-            Card(modifier = Modifier.fillMaxWidth()) {
-                ListItem(
-                    headlineContent = { Text("Theme") },
-                    supportingContent = { Text(themeMode.displayName) },
-                    leadingContent = {
-                        // Show a different icon for each theme mode.
-                        Icon(
-                            when (themeMode) {
-                                ThemeMode.LIGHT -> Icons.Default.LightMode
-                                ThemeMode.DARK -> Icons.Default.DarkMode
-                                ThemeMode.SYSTEM -> Icons.Default.BrightnessAuto
-                            },
-                            contentDescription = null
-                        )
                     },
-                    trailingContent = {
-                        TextButton(onClick = { showThemeDialog = true }) {
-                            Text("Change")
-                        }
-                    }
+                )
+            }
+
+            SettingCard {
+                ListItem(
+                    headlineContent = { Text(stringResource(R.string.settings_wifi_only)) },
+                    supportingContent = { Text(stringResource(R.string.settings_wifi_only_detail)) },
+                    leadingContent = { Icon(Icons.Default.Wifi, contentDescription = null) },
+                    trailingContent = { Switch(checked = state.wifiOnly, onCheckedChange = null) },
+                    modifier = Modifier.toggleable(
+                        value = state.wifiOnly,
+                        role = Role.Switch,
+                        onValueChange = viewModel::setWifiOnly,
+                    ),
                 )
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+            SectionTitle(stringResource(R.string.settings_section_permissions))
 
-            // --- Account section ---
-            Text("Account", style = MaterialTheme.typography.titleLarge)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                PermissionCard(
+                    icon = Icons.Default.Notifications,
+                    title = stringResource(R.string.perm_notifications),
+                    detail = stringResource(R.string.perm_notifications_detail),
+                    ok = notificationsGranted,
+                    actionLabel = stringResource(R.string.action_allow),
+                    onAction = { notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) },
+                )
+            }
+            PermissionCard(
+                icon = Icons.Default.BatteryAlert,
+                title = stringResource(R.string.perm_battery),
+                detail = stringResource(R.string.perm_battery_detail),
+                ok = ignoringBatteryOptimizations,
+                actionLabel = stringResource(R.string.action_allow),
+                onAction = {
+                    try {
+                        context.startActivity(
+                            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                .setData(Uri.parse("package:${context.packageName}")),
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Battery optimization settings unavailable")
+                    }
+                },
+            )
+            val hibernationApplies = hibernationStatus == UnusedAppRestrictionsConstants.API_30_BACKPORT ||
+                hibernationStatus == UnusedAppRestrictionsConstants.API_30 ||
+                hibernationStatus == UnusedAppRestrictionsConstants.API_31
+            if (hibernationApplies || hibernationStatus == UnusedAppRestrictionsConstants.DISABLED) {
+                PermissionCard(
+                    icon = Icons.Default.Hotel,
+                    title = stringResource(R.string.perm_hibernation),
+                    detail = stringResource(R.string.perm_hibernation_detail),
+                    ok = !hibernationApplies,
+                    actionLabel = stringResource(R.string.action_turn_off),
+                    onAction = {
+                        try {
+                            hibernationLauncher.launch(
+                                IntentCompat.createManageUnusedAppRestrictionsIntent(context, context.packageName),
+                            )
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Unused app settings unavailable")
+                        }
+                    },
+                )
+            }
 
-            // Account info card -- shows email or "Not signed in", with sign-out button.
-            Card(modifier = Modifier.fillMaxWidth()) {
+            Spacer(modifier = Modifier.height(16.dp))
+            SectionTitle(stringResource(R.string.settings_section_appearance))
+            SettingCard {
                 ListItem(
-                    headlineContent = { Text(googleEmail ?: "Not signed in") },
+                    headlineContent = { Text(stringResource(R.string.settings_theme)) },
+                    supportingContent = { Text(stringResource(state.themeMode.labelRes())) },
+                    leadingContent = { Icon(state.themeMode.icon(), contentDescription = null) },
+                    trailingContent = {
+                        TextButton(onClick = { showThemeDialog = true }) { Text(stringResource(R.string.action_change)) }
+                    },
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            SectionTitle(stringResource(R.string.settings_section_account))
+            SettingCard {
+                ListItem(
+                    headlineContent = { Text(state.accountEmail ?: stringResource(R.string.not_signed_in)) },
+                    supportingContent = if (state.signedIn) {
+                        { Text(stringResource(R.string.settings_account_detail)) }
+                    } else {
+                        null
+                    },
                     leadingContent = { Icon(Icons.Default.AccountCircle, contentDescription = null) },
                     trailingContent = {
-                        if (googleEmail != null) {
-                            TextButton(onClick = { viewModel.signOut() }) {
-                                Text("Sign Out")
+                        if (state.signedIn) {
+                            TextButton(onClick = { showSignOutDialog = true }, enabled = !state.signingOut) {
+                                Text(stringResource(R.string.action_sign_out))
                             }
                         }
-                    }
+                    },
                 )
             }
 
             Spacer(modifier = Modifier.height(16.dp))
-
-            // --- About section ---
-            Text("About", style = MaterialTheme.typography.titleLarge)
-
-            Card(modifier = Modifier.fillMaxWidth()) {
+            SectionTitle(stringResource(R.string.settings_section_about))
+            SettingCard {
                 ListItem(
-                    headlineContent = { Text("Build Time") },
+                    headlineContent = { Text(stringResource(R.string.settings_build_time)) },
                     supportingContent = { Text(BuildConfig.BUILD_TIME) },
                     leadingContent = { Icon(Icons.Default.Info, contentDescription = null) },
                 )
@@ -350,101 +378,158 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Dialogs -- rendered conditionally based on boolean state flags.
-    // -----------------------------------------------------------------------
-
-    // Time picker dialog for changing the upload schedule.
     if (showTimePicker) {
         TimePickerDialog(
-            initialHour = scheduleHour,
-            initialMinute = scheduleMinute,
+            initialHour = state.scheduleHour,
+            initialMinute = state.scheduleMinute,
             onConfirm = { h, m ->
                 viewModel.setScheduleTime(h, m)
                 showTimePicker = false
             },
-            onDismiss = { showTimePicker = false }
+            onDismiss = { showTimePicker = false },
         )
     }
 
-    // Drive folder picker dialog for browsing and selecting a Drive folder.
-    if (showDrivePicker) {
+    if (state.picker.visible) {
         DriveFolderPickerDialog(
-            folders = driveFolders,
-            isLoading = isLoadingFolders,
-            currentFolderName = currentDriveFolderName,
-            onNavigateToFolder = { viewModel.navigateToFolder(it) },
-            onNavigateUp = { viewModel.navigateUp() },
-            onSelectCurrentFolder = { folder ->
-                viewModel.setDriveFolder(folder)
-                showDrivePicker = false
-            },
-            onCreateFolder = { name -> viewModel.createFolder(name) },
-            onDismiss = { showDrivePicker = false },
-            currentFolder = currentDriveFolder
+            state = state.picker,
+            onOpenFolder = viewModel::openFolder,
+            onNavigateUp = viewModel::navigateUp,
+            onSelect = viewModel::selectDriveFolder,
+            onCreateFolder = viewModel::createFolder,
+            onRetry = viewModel::retryLoad,
+            onDismiss = viewModel::dismissDrivePicker,
         )
     }
 
-    // Theme selection dialog with radio buttons for Light/Dark/System.
     if (showThemeDialog) {
         ThemeSelectionDialog(
-            currentMode = themeMode,
+            currentMode = state.themeMode,
             onSelectMode = { mode ->
                 viewModel.setThemeMode(mode)
                 showThemeDialog = false
             },
-            onDismiss = { showThemeDialog = false }
+            onDismiss = { showThemeDialog = false },
+        )
+    }
+
+    if (showSignOutDialog) {
+        AlertDialog(
+            onDismissRequest = { showSignOutDialog = false },
+            title = { Text(stringResource(R.string.sign_out_title)) },
+            text = { Text(stringResource(R.string.sign_out_message)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    showSignOutDialog = false
+                    viewModel.signOut()
+                }) { Text(stringResource(R.string.action_sign_out)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSignOutDialog = false }) { Text(stringResource(R.string.action_cancel)) }
+            },
         )
     }
 }
 
-/**
- * A dialog with radio buttons for choosing the app's theme mode.
- *
- * Iterates over all [ThemeMode.entries] and renders a RadioButton + label for each.
- * Selecting a mode immediately calls [onSelectMode] and closes the dialog.
- *
- * @param currentMode The currently active theme mode (determines which radio is selected).
- * @param onSelectMode Callback when a mode is selected.
- * @param onDismiss Callback when the dialog is dismissed (Cancel button or back press).
- */
+private fun hasNotificationPermission(context: Context): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+        PackageManager.PERMISSION_GRANTED
+
+private fun ThemeMode.icon(): ImageVector = when (this) {
+    ThemeMode.LIGHT -> Icons.Default.LightMode
+    ThemeMode.DARK -> Icons.Default.DarkMode
+    ThemeMode.SYSTEM -> Icons.Default.BrightnessAuto
+}
+
+@Composable
+private fun SectionTitle(text: String) {
+    Text(text, style = MaterialTheme.typography.titleLarge, modifier = Modifier.semantics { heading() })
+}
+
+@Composable
+private fun SettingCard(content: @Composable () -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth()) { content() }
+}
+
+@Composable
+private fun PermissionCard(
+    icon: ImageVector,
+    title: String,
+    detail: String,
+    ok: Boolean,
+    actionLabel: String,
+    onAction: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = if (ok) {
+            CardDefaults.cardColors()
+        } else {
+            CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+            )
+        },
+    ) {
+        ListItem(
+            headlineContent = { Text(title) },
+            supportingContent = {
+                Text(if (ok) stringResource(R.string.perm_ok) else detail)
+            },
+            leadingContent = { Icon(icon, contentDescription = null) },
+            trailingContent = {
+                if (!ok) TextButton(onClick = onAction) { Text(actionLabel) }
+            },
+            colors = if (ok) {
+                androidx.compose.material3.ListItemDefaults.colors()
+            } else {
+                androidx.compose.material3.ListItemDefaults.colors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    headlineColor = MaterialTheme.colorScheme.onErrorContainer,
+                    supportingColor = MaterialTheme.colorScheme.onErrorContainer,
+                    leadingIconColor = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            },
+        )
+    }
+}
+
 @Composable
 private fun ThemeSelectionDialog(
     currentMode: ThemeMode,
     onSelectMode: (ThemeMode) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Choose theme") },
+        title = { Text(stringResource(R.string.theme_dialog_title)) },
         text = {
-            Column {
-                // Render one radio button row for each ThemeMode enum entry.
+            Column(modifier = Modifier.selectableGroup()) {
                 ThemeMode.entries.forEach { mode ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 4.dp)
+                            .selectable(
+                                selected = mode == currentMode,
+                                onClick = { onSelectMode(mode) },
+                                role = Role.RadioButton,
+                            )
+                            .padding(vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        RadioButton(
-                            selected = mode == currentMode,
-                            onClick = { onSelectMode(mode) }
-                        )
+                        RadioButton(selected = mode == currentMode, onClick = null)
                         Text(
-                            text = mode.displayName,
+                            stringResource(mode.labelRes()),
                             style = MaterialTheme.typography.bodyLarge,
-                            modifier = Modifier
-                                .padding(start = 8.dp)
-                                .align(alignment = androidx.compose.ui.Alignment.CenterVertically)
+                            modifier = Modifier.padding(start = 16.dp),
                         )
                     }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+        },
     )
 }

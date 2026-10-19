@@ -1,25 +1,3 @@
-/**
- * UploadProgressCard.kt - A card component that displays detailed upload progress statistics.
- *
- * This composable renders a Material3 Card showing real-time upload metrics during an
- * active file upload. It displays:
- * - A determinate linear progress bar showing completion percentage
- * - Bytes uploaded vs. total bytes (e.g., "45.2 MB / 128.0 MB")
- * - Upload speed (e.g., "2.3 MB/s")
- * - Estimated time remaining (e.g., "~36 sec remaining" or "~2 min remaining")
- *
- * The card is designed to visually integrate with the existing [StatusCard] on the Home
- * screen. It uses the same secondaryContainer color scheme as the "Uploading" status to
- * maintain visual consistency.
- *
- * This component is only displayed when an upload is actively running AND progress data
- * is available from the worker. Before the first progress callback (while the upload is
- * initializing), the regular StatusCard with an indeterminate spinner is shown instead.
- *
- * @see domain.model.UploadProgress for the data model
- * @see ui.component.StatusCard for the companion status display
- * @see ui.screen.home.HomeScreen for where this card is placed
- */
 package com.johnsonyuen.signalbackup.ui.component
 
 import androidx.compose.animation.core.animateFloatAsState
@@ -28,8 +6,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -37,114 +20,119 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
+import com.johnsonyuen.signalbackup.R
 import com.johnsonyuen.signalbackup.domain.model.UploadProgress
+import com.johnsonyuen.signalbackup.domain.scheduling.UploadRunState
+import com.johnsonyuen.signalbackup.ui.common.durationText
 import com.johnsonyuen.signalbackup.util.formatFileSize
+import com.johnsonyuen.signalbackup.util.formatSpeed
 
-/**
- * Displays detailed upload progress as a styled card with a progress bar and statistics.
- *
- * @param progress The current [UploadProgress] snapshot from the ViewModel.
- * @param modifier Optional Modifier for layout customization by the caller.
- */
+/** Current run: queued, or uploading with progress, current file, speed and ETA. */
 @Composable
-fun UploadProgressCard(progress: UploadProgress, modifier: Modifier = Modifier) {
-    // Animate the progress bar fraction for smooth visual transitions between chunks.
-    val animatedFraction by animateFloatAsState(
-        targetValue = progress.fraction,
-        label = "upload_progress",
-    )
+fun UploadRunCard(run: UploadRunState, modifier: Modifier = Modifier) {
+    when (run) {
+        UploadRunState.Idle -> Unit
+        is UploadRunState.Queued -> QueuedCard(manual = run.manual, modifier = modifier)
+        is UploadRunState.Running -> RunningCard(progress = run.progress, modifier = modifier)
+    }
+}
 
+@Composable
+private fun QueuedCard(manual: Boolean, modifier: Modifier) {
     Card(
         modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer
-        )
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
     ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // Title row with percentage
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Icon(Icons.Default.HourglassTop, contentDescription = null)
+            Column {
                 Text(
-                    text = "Uploading backup...",
-                    style = MaterialTheme.typography.bodyLarge
-                )
-                Text(
-                    text = "${progress.percentComplete}%",
+                    stringResource(if (manual) R.string.run_queued_manual else R.string.run_queued_scheduled),
                     style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.primary
                 )
-            }
-
-            // Determinate progress bar showing upload completion.
-            LinearProgressIndicator(
-                progress = { animatedFraction },
-                modifier = Modifier.fillMaxWidth(),
-                trackColor = MaterialTheme.colorScheme.surfaceVariant,
-            )
-
-            // Bytes transferred: "45.2 MB / 128.0 MB"
-            Text(
-                text = "${formatFileSize(progress.bytesUploaded)} / ${formatFileSize(progress.totalBytes)}",
-                style = MaterialTheme.typography.bodyMedium
-            )
-
-            // Speed and ETA row
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                // Upload speed: "2.3 MB/s"
-                if (progress.speedBytesPerSec > 0) {
-                    Text(
-                        text = "${formatFileSize(progress.speedBytesPerSec)}/s",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                // Estimated time remaining: "~36 sec remaining" or "~2 min remaining"
-                if (progress.estimatedSecondsRemaining > 0) {
-                    Text(
-                        text = formatTimeRemaining(progress.estimatedSecondsRemaining),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                Text(stringResource(R.string.run_queued_detail), style = MaterialTheme.typography.bodySmall)
             }
         }
     }
 }
 
-/**
- * Formats a duration in seconds into a human-readable "time remaining" string.
- *
- * Uses the most appropriate unit:
- * - Under 60 seconds: "~X sec remaining"
- * - 60 seconds to 59 minutes: "~X min remaining"
- * - 60 minutes and above: "~X hr Y min remaining"
- *
- * @param seconds The estimated seconds remaining.
- * @return A formatted string like "~36 sec remaining" or "~2 min remaining".
- */
-private fun formatTimeRemaining(seconds: Long): String {
-    return when {
-        seconds < 60 -> "~${seconds} sec remaining"
-        seconds < 3600 -> {
-            val minutes = seconds / 60
-            "~${minutes} min remaining"
+@Composable
+private fun RunningCard(progress: UploadProgress?, modifier: Modifier) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (progress == null || progress.totalBytes <= 0) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                    Text(stringResource(R.string.run_preparing), style = MaterialTheme.typography.titleMedium)
+                }
+            } else {
+                ProgressDetails(progress)
+            }
         }
-        else -> {
-            val hours = seconds / 3600
-            val minutes = (seconds % 3600) / 60
-            if (minutes > 0) "~${hours} hr ${minutes} min remaining"
-            else "~${hours} hr remaining"
+    }
+}
+
+@Composable
+private fun ProgressDetails(progress: UploadProgress) {
+    val animated by animateFloatAsState(targetValue = progress.fraction, label = "upload_progress")
+    val percentText = stringResource(R.string.run_percent, progress.percentComplete)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(stringResource(R.string.run_uploading), style = MaterialTheme.typography.titleMedium)
+        Text(percentText, style = MaterialTheme.typography.titleMedium)
+    }
+    LinearProgressIndicator(
+        progress = { animated },
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { stateDescription = percentText },
+    )
+    progress.currentFileName?.let {
+        Text(
+            stringResource(R.string.run_current_file, it),
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+        )
+    }
+    Text(
+        stringResource(
+            R.string.run_bytes,
+            formatFileSize(progress.bytesUploaded),
+            formatFileSize(progress.totalBytes),
+        ),
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        if (progress.speedBytesPerSec > 0) {
+            Text(formatSpeed(progress.speedBytesPerSec), style = MaterialTheme.typography.bodySmall)
+        }
+        if (progress.estimatedSecondsRemaining >= 0) {
+            Text(
+                stringResource(R.string.run_eta, durationText(progress.estimatedSecondsRemaining)),
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
