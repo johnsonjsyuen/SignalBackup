@@ -1,19 +1,30 @@
-*.iml
-/.gradle
-/local.properties
-/.idea
-/build
-/app/build
+# Gradle / build outputs
+.gradle/
+build/
+/app/build/
 /captures
-.externalNativeBuild
-.cxx
+.externalNativeBuild/
+.cxx/
+.kotlin/
 *.apk
-*.ap_
 *.aab
+*.ap_
+*.dex
+ci-logs/
 
-# Client secrets and credentials
+# Local configuration
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Secrets and signing
 client_secret_*.json
 credentials.json
+google-services.json
 *.keystore
 *.jks
 
@@ -23,5 +34,4 @@ test.backup
 # Claude Code
 .claude/
 
-# Kotlin
-.kotlin/
+# Note: app/schemas/ (Room schema history) is intentionally tracked.

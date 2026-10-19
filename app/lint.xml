@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- Dependency freshness is handled by Dependabot, not by failing lint. -->
+    <issue id="GradleDependency" severity="ignore" />
+    <issue id="NewerVersionAvailable" severity="ignore" />
+    <issue id="AndroidGradlePluginVersion" severity="ignore" />
+    <!-- targetSdk is intentionally one below compileSdk until behaviour changes for API 37 are reviewed. -->
+    <issue id="OldTargetApi" severity="ignore" />
+</lint>
