@@ -206,9 +206,9 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    /** Result of the consent screen launched for [action]. */
-    fun onConsentResult(action: ConsentAction?, data: Intent?) {
-        val resumeAction = action ?: pendingConsentAction ?: ConsentAction.RESOLVE_FOLDER
+    /** Result of the consent screen; resumes the action that needed consent. */
+    fun onConsentResult(data: Intent?) {
+        val resumeAction = pendingConsentAction ?: ConsentAction.RESOLVE_FOLDER
         pendingConsentAction = null
         viewModelScope.launch {
             val result = authorizationFlow.complete(data)

@@ -7,6 +7,7 @@ import com.johnsonyuen.signalbackup.domain.model.LocalBackupFile
 import com.johnsonyuen.signalbackup.domain.model.MirrorProgressListener
 import com.johnsonyuen.signalbackup.domain.model.SyncedFile
 import com.johnsonyuen.signalbackup.domain.upload.FileUploader
+import com.johnsonyuen.signalbackup.domain.upload.LocalFileChangedException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import java.time.Clock
@@ -17,6 +18,8 @@ class MirrorStats {
     var bytesUploaded: Long = 0L
     var filesUploaded: Int = 0
     var filesAdopted: Int = 0
+    /** Files skipped because they changed while being read (retried next run). */
+    var filesSkipped: Int = 0
 }
 
 /** Result of a completed mirror pass. [records] are the synced_file rows after the pass. */
@@ -64,6 +67,7 @@ class MirrorSyncer @Inject constructor(
         val ordered = orderForUpload(pending, snapshot.backupItems)
         val total = ordered.sumOf { it.sizeBytes }
         var done = 0L
+        val incompleteItems = mutableSetOf<String>()
         if (ordered.isNotEmpty()) progress?.onProgress(0L, total, null)
 
         for (file in ordered) {
@@ -72,24 +76,28 @@ class MirrorSyncer @Inject constructor(
             val parentId = run.folderIds[parentPath]
                 ?: throw LocalReadException("Backup subfolder changed during scan")
 
-            val adopted = findAdoptable(file, parentId, run)
-            val driveId: String
-            val md5: String
-            if (adopted != null) {
-                driveId = adopted.first
-                md5 = adopted.second
-                stats.filesAdopted++
-            } else {
-                val base = done
-                val verified = fileUploader.upload(file, parentId) { sent ->
+            val top = file.relativePath.substringBefore('/')
+            val base = done
+            val deferManifest = file.name == BackupNames.MANIFEST_FILE_NAME && top in incompleteItems
+            val result = if (deferManifest) {
+                stats.filesSkipped++
+                null
+            } else try {
+                transfer(file, parentId, run, stats) { sent ->
                     progress?.onProgress(base + sent.coerceIn(0L, file.sizeBytes), total, file.name)
                 }
-                driveId = verified.file.id
-                md5 = verified.md5
-                stats.bytesUploaded += verified.bytesSent
-                stats.filesUploaded++
+            } catch (e: LocalFileChangedException) {
+                // Signal is still changing it; it will be picked up on the next run.
+                stats.filesSkipped++
+                incompleteItems += top
+                null
             }
             done += file.sizeBytes
+            if (result == null) {
+                progress?.onProgress(done, total, null)
+                continue
+            }
+            val (driveId, md5) = result
             val record = SyncedFile(
                 relativePath = file.relativePath,
                 isDirectory = false,
@@ -105,6 +113,25 @@ class MirrorSyncer @Inject constructor(
         }
 
         return MirrorOutcome(stats.bytesUploaded, stats.filesUploaded, stats.filesAdopted, records.toMap())
+    }
+
+    /** Adopts an identical Drive copy or uploads [file]; returns (driveId, md5). */
+    private suspend fun transfer(
+        file: LocalBackupFile,
+        parentId: String,
+        run: RunState,
+        stats: MirrorStats,
+        onProgress: (Long) -> Unit,
+    ): Pair<String, String> {
+        val adopted = findAdoptable(file, parentId, run)
+        if (adopted != null) {
+            stats.filesAdopted++
+            return adopted
+        }
+        val verified = fileUploader.upload(file, parentId, onProgress)
+        stats.bytesUploaded += verified.bytesSent
+        stats.filesUploaded++
+        return verified.file.id to verified.md5
     }
 
     private class RunState(rootId: String) {

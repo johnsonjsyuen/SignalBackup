@@ -103,6 +103,12 @@ class PerformUploadUseCase @Inject constructor(
         state.backupSizeBytes = newest.sizeBytes
 
         val outcome = mirrorSyncer.sync(snapshot, folder.folderId, progress, state.stats)
+        if (state.stats.filesSkipped > 0) {
+            state.note = join(
+                "${state.stats.filesSkipped} file(s) changed during upload and will be retried next run",
+                state.note,
+            )
+        }
         val newestRecord = outcome.records[newest.name]
         state.driveFileId = newestRecord?.driveFileId
         state.md5 = if (newest.isSnapshot) null else newestRecord?.md5Checksum
@@ -115,29 +121,20 @@ class PerformUploadUseCase @Inject constructor(
     }
 
     private suspend fun record(result: UploadResult, state: RunState) {
-        val status: UploadResultStatus
-        val reason: FailureReason?
-        val message: String?
-        when (result) {
-            is UploadResult.Success -> {
-                status = UploadResultStatus.SUCCESS; reason = null; message = state.note
-            }
-            is UploadResult.NoNewBackup -> {
-                status = UploadResultStatus.STALE; reason = null
-                message = join("No new Signal backup in the last 48 hours", state.note)
-            }
-            is UploadResult.Failed -> {
-                status = UploadResultStatus.FAILED; reason = result.reason
-                message = join(result.detail, state.note)
-            }
-            UploadResult.NeedsConsent -> {
-                status = UploadResultStatus.FAILED; reason = FailureReason.NEEDS_CONSENT
-                message = "Google Drive access needs to be granted again"
-            }
-            UploadResult.WaitingForWifi -> {
-                status = UploadResultStatus.FAILED; reason = FailureReason.NETWORK
-                message = "Waiting for Wi-Fi"
-            }
+        val (status, reason, message) = when (result) {
+            is UploadResult.Success -> Triple(UploadResultStatus.SUCCESS, null, state.note)
+            is UploadResult.NoNewBackup -> Triple(
+                UploadResultStatus.STALE,
+                null,
+                join("No new Signal backup in the last 48 hours", state.note),
+            )
+            is UploadResult.Failed -> Triple(UploadResultStatus.FAILED, result.reason, join(result.detail, state.note))
+            UploadResult.NeedsConsent -> Triple(
+                UploadResultStatus.FAILED,
+                FailureReason.NEEDS_CONSENT,
+                "Google Drive access needs to be granted again",
+            )
+            UploadResult.WaitingForWifi -> Triple(UploadResultStatus.FAILED, FailureReason.NETWORK, "Waiting for Wi-Fi")
             UploadResult.AlreadyRunning -> return
         }
         val success = status != UploadResultStatus.FAILED

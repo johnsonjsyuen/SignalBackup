@@ -1,6 +1,9 @@
 package com.johnsonyuen.signalbackup.domain.mirror
 
 import com.johnsonyuen.signalbackup.domain.mirror.FakeDocumentTreeSource.Companion.ROOT
+import com.johnsonyuen.signalbackup.domain.model.LocalBackupFile
+import com.johnsonyuen.signalbackup.domain.upload.LocalFileChangedException
+import io.mockk.coEvery
 import io.mockk.coVerify
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -136,5 +139,23 @@ class MirrorSyncerTest {
             listOf("signal-backup-2026-10-17-03-00-00/backup.db", "signal-backup-2026-10-17-03-00-00/manifest.json"),
             uploaded,
         )
+    }
+
+    @Test
+    fun fileChangedDuringUploadIsSkippedNotFailed() = runTest {
+        mixedTree()
+        coEvery {
+            uploader.upload(match<LocalBackupFile> { it.name == "backup.db" && "10-18" in it.relativePath }, any(), any())
+        } throws LocalFileChangedException("changed")
+        val stats = MirrorStats()
+
+        val outcome = syncer.sync(scanner.scan(TREE_URI), driveRoot, null, stats)
+
+        // The snapshot's manifest waits until the rest of the snapshot is up.
+        assertEquals(2, stats.filesSkipped)
+        assertEquals(4, outcome.filesUploaded)
+        assertTrue("signal-backup-2026-10-18-03-00-00/backup.db" !in synced.map)
+        assertTrue("signal-backup-2026-10-18-03-00-00/manifest.json" !in synced.map)
+        assertTrue("signal-backup-2026-10-18-03-00-00/attachments/a1" in synced.map)
     }
 }
