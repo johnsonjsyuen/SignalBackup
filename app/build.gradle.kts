@@ -193,3 +193,10 @@ dependencies {
     testImplementation(libs.androidx.room.testing)
     testImplementation(libs.androidx.arch.core.testing)
 }
+
+// Unit tests stream multi-chunk (8 MiB) fake files and load Robolectric; the default 512 MB test heap is too small.
+tasks.withType<Test>().configureEach {
+    maxHeapSize = "2g"
+    maxParallelForks = 2
+    forkEvery = 20
+}
