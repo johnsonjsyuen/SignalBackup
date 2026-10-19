@@ -1,153 +1,76 @@
 package com.johnsonyuen.signalbackup.data.repository
 
-import android.util.Log
 import com.johnsonyuen.signalbackup.data.local.db.SettingsDao
 import com.johnsonyuen.signalbackup.data.local.entity.SettingsEntity
-import com.johnsonyuen.signalbackup.domain.model.ResumableUploadSession
+import com.johnsonyuen.signalbackup.data.local.entity.toAppSettings
+import com.johnsonyuen.signalbackup.domain.model.AppSettings
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.shareIn
 import javax.inject.Inject
+import javax.inject.Singleton
 
-class SettingsRepositoryImpl @Inject constructor(
-    private val settingsDao: SettingsDao,
+/** Room-backed settings. All flows derive from one shared, distinct-until-changed source. */
+@Singleton
+class SettingsRepositoryImpl internal constructor(
+    private val dao: SettingsDao,
+    scope: CoroutineScope,
 ) : SettingsRepository {
 
-    private val settingsFlow: Flow<SettingsEntity> =
-        settingsDao.getSettings()
-            .onEach { Log.d(TAG, "Room emitted settings entity: $it") }
-            .map { it ?: SettingsEntity() }
+    @Inject
+    constructor(dao: SettingsDao) : this(dao, CoroutineScope(SupervisorJob() + Dispatchers.Default))
 
-    override val localFolderUri: Flow<String?> =
-        settingsFlow.map { it.localFolderUri }
+    override val settings: Flow<AppSettings> = dao.observe()
+        .map { (it ?: SettingsEntity()).toAppSettings() }
+        .distinctUntilChanged()
+        .shareIn(scope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), replay = 1)
 
-    override val driveFolderId: Flow<String?> =
-        settingsFlow.map { it.driveFolderId }
+    override suspend fun current(): AppSettings = (dao.get() ?: SettingsEntity()).toAppSettings()
 
-    override val driveFolderName: Flow<String?> =
-        settingsFlow.map { it.driveFolderName }
+    override val localFolderUri: Flow<String?> = select { it.localFolderUri }
+    override val driveFolderId: Flow<String?> = select { it.driveFolderId }
+    override val driveFolderName: Flow<String?> = select { it.driveFolderName }
+    override val scheduleEnabled: Flow<Boolean> = select { it.scheduleEnabled }
+    override val scheduleHour: Flow<Int> = select { it.scheduleHour }
+    override val scheduleMinute: Flow<Int> = select { it.scheduleMinute }
+    override val googleAccountEmail: Flow<String?> = select { it.googleAccountEmail }
+    override val themeMode: Flow<String> = select { it.themeMode }
+    override val wifiOnly: Flow<Boolean> = select { it.wifiOnly }
 
-    override val scheduleHour: Flow<Int> =
-        settingsFlow.map { it.scheduleHour }
+    override suspend fun setLocalFolderUri(uri: String?) = update { dao.updateLocalFolderUri(uri) }
 
-    override val scheduleMinute: Flow<Int> =
-        settingsFlow.map { it.scheduleMinute }
+    override suspend fun setDriveFolder(id: String?, name: String?) = update { dao.updateDriveFolder(id, name) }
 
-    override val googleAccountEmail: Flow<String?> =
-        settingsFlow.map { it.googleAccountEmail }
-
-    override val themeMode: Flow<String> =
-        settingsFlow.map { it.themeMode }
-
-    override val wifiOnly: Flow<Boolean> =
-        settingsFlow.map { it.wifiOnly }
-
-    override suspend fun setLocalFolderUri(uri: String?) {
-        Log.d(TAG, "setLocalFolderUri: $uri")
-        settingsDao.updateLocalFolderUri(uri)
-        Log.d(TAG, "setLocalFolderUri done, row now: ${settingsDao.getSettingsOnce()}")
-    }
-
-    override suspend fun setDriveFolderId(id: String?) {
-        Log.d(TAG, "setDriveFolderId: $id")
-        settingsDao.updateDriveFolderId(id)
-        Log.d(TAG, "setDriveFolderId done, row now: ${settingsDao.getSettingsOnce()}")
-    }
-
-    override suspend fun setDriveFolderName(name: String?) {
-        Log.d(TAG, "setDriveFolderName: $name")
-        settingsDao.updateDriveFolderName(name)
-    }
-
-    override suspend fun setScheduleHour(hour: Int) {
-        settingsDao.updateScheduleHour(hour)
-    }
-
-    override suspend fun setScheduleMinute(minute: Int) {
-        settingsDao.updateScheduleMinute(minute)
-    }
+    override suspend fun setScheduleEnabled(enabled: Boolean) = update { dao.updateScheduleEnabled(enabled) }
 
     override suspend fun setScheduleTime(hour: Int, minute: Int) {
-        settingsDao.updateScheduleTime(hour, minute)
+        require(hour in 0..23 && minute in 0..59) { "Invalid schedule time" }
+        update { dao.updateScheduleTime(hour, minute) }
     }
 
-    override suspend fun clearAccountData() {
-        settingsDao.clearAccountData()
-        settingsDao.clearResumableSession()
+    override suspend fun setGoogleAccountEmail(email: String?) = update { dao.updateGoogleAccountEmail(email) }
+
+    override suspend fun setThemeMode(mode: String) = update { dao.updateThemeMode(mode) }
+
+    override suspend fun setWifiOnly(enabled: Boolean) = update { dao.updateWifiOnly(enabled) }
+
+    override suspend fun clearAccountData() = update { dao.clearAccountData() }
+
+    private fun <T> select(selector: (AppSettings) -> T): Flow<T> =
+        settings.map(selector).distinctUntilChanged()
+
+    /** Updates are UPDATE statements, so make sure the single row exists first. */
+    private suspend inline fun update(block: () -> Unit) {
+        dao.insertIfAbsent(SettingsEntity())
+        block()
     }
 
-    override suspend fun setGoogleAccountEmail(email: String?) {
-        Log.d(TAG, "setGoogleAccountEmail: $email")
-        settingsDao.updateGoogleAccountEmail(email)
-        Log.d(TAG, "setGoogleAccountEmail done, row now: ${settingsDao.getSettingsOnce()}")
-    }
-
-    override suspend fun setThemeMode(mode: String) {
-        Log.d(TAG, "setThemeMode: $mode")
-        settingsDao.updateThemeMode(mode)
-    }
-
-    override suspend fun setWifiOnly(enabled: Boolean) {
-        Log.d(TAG, "setWifiOnly: $enabled")
-        settingsDao.updateWifiOnly(enabled)
-    }
-
-    override val retryAtMillis: Flow<Long?> =
-        settingsFlow.map { it.retryAtMillis }
-
-    override val retryError: Flow<String?> =
-        settingsFlow.map { it.retryError }
-
-    override suspend fun setRetryScheduled(retryAtMillis: Long, error: String) {
-        settingsDao.updateRetryScheduled(retryAtMillis, error)
-    }
-
-    override suspend fun clearRetryScheduled() {
-        settingsDao.clearRetryScheduled()
-    }
-
-
-    override suspend fun getResumableSession(): ResumableUploadSession? {
-        val entity = settingsDao.getSettingsOnce() ?: return null
-        val sessionUri = entity.resumeSessionUri ?: return null
-        return ResumableUploadSession(
-            sessionUri = sessionUri,
-            localFileUri = entity.resumeLocalFileUri ?: return null,
-            fileName = entity.resumeFileName ?: return null,
-            bytesUploaded = entity.resumeBytesUploaded ?: 0L,
-            totalBytes = entity.resumeTotalBytes ?: return null,
-            driveFolderId = entity.resumeDriveFolderId ?: return null,
-            createdAtMillis = entity.resumeCreatedAt ?: return null,
-            driveFileId = entity.resumeDriveFileId,
-        )
-    }
-
-    override suspend fun saveResumableSession(session: ResumableUploadSession) {
-        settingsDao.saveResumableSession(
-            sessionUri = session.sessionUri,
-            localFileUri = session.localFileUri,
-            fileName = session.fileName,
-            bytesUploaded = session.bytesUploaded,
-            totalBytes = session.totalBytes,
-            driveFolderId = session.driveFolderId,
-            createdAt = session.createdAtMillis,
-            driveFileId = session.driveFileId,
-        )
-    }
-
-    override suspend fun updateResumableBytesUploaded(bytesUploaded: Long) {
-        settingsDao.updateResumableBytesUploaded(bytesUploaded)
-    }
-
-    override suspend fun updateResumableDriveFileId(driveFileId: String) {
-        settingsDao.updateResumableDriveFileId(driveFileId)
-    }
-
-    override suspend fun clearResumableSession() {
-        settingsDao.clearResumableSession()
-    }
-
-    companion object {
-        private const val TAG = "SettingsRepo"
+    private companion object {
+        const val STOP_TIMEOUT_MS = 5_000L
     }
 }
