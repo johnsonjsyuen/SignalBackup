@@ -2,7 +2,7 @@ name: CI Build
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
     branches: [main]
 
@@ -32,7 +32,14 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug -Dorg.gradle.java.home=$JAVA_HOME
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug -Dorg.gradle.java.home=$JAVA_HOME 2>&1 | tee build.log
+
+      - name: Annotate build errors
+        if: failure()
+        run: |
+          grep -E '^e: |error:|What went wrong|Could not|> ' build.log | head -60 | while IFS= read -r line; do echo "::error::${line}"; done
 
       - name: Run lint
         run: ./gradlew lint -Dorg.gradle.java.home=$JAVA_HOME
