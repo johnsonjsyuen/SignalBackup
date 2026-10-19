@@ -11,7 +11,7 @@ plugins {
     alias(libs.plugins.room)
 }
 
-/** Gradle property, falling back to local.properties (not committed). */
+/** Gradle property, falling back to local.properties (not committed). Blank values count as unset. */
 val localProperties: Properties = Properties().apply {
     val text = providers.fileContents(rootProject.layout.projectDirectory.file("local.properties"))
         .asText.orNull
@@ -19,7 +19,8 @@ val localProperties: Properties = Properties().apply {
 }
 
 fun configValue(name: String): String? =
-    providers.gradleProperty(name).orNull ?: localProperties.getProperty(name)
+    providers.gradleProperty(name).orNull?.takeIf { it.isNotBlank() }
+        ?: localProperties.getProperty(name)?.takeIf { it.isNotBlank() }
 
 val appVersionCode: Int = configValue("versionCode")?.toIntOrNull() ?: 1
 val appVersionName: String = configValue("versionName") ?: "1.0"
@@ -35,6 +36,16 @@ val buildTime: String = runCatching {
 }.getOrNull()?.takeIf { it.isNotEmpty() } ?: "unknown"
 
 val keystoreFile: String? = providers.environmentVariable("KEYSTORE_FILE").orNull?.takeIf { it.isNotBlank() }
+
+/**
+ * Optional fixed debug keystore (CI). Without it each CI runner signs debug APKs with a freshly
+ * generated ~/.android/debug.keystore, whose SHA-1 can never be registered as an Android OAuth client.
+ */
+val debugKeystoreFile: String? =
+    providers.environmentVariable("DEBUG_KEYSTORE_FILE").orNull?.takeIf { it.isNotBlank() }
+
+fun envOrDefault(name: String, default: String): String =
+    providers.environmentVariable(name).orNull?.takeIf { it.isNotBlank() } ?: default
 
 android {
     namespace = "com.johnsonyuen.signalbackup"
@@ -61,9 +72,24 @@ android {
                 keyPassword = providers.environmentVariable("KEY_PASSWORD").orNull
             }
         }
+        // Distinct name: AGP already defines a "debug" signing config (the local debug keystore).
+        debugKeystoreFile?.let { path ->
+            create("ciDebug") {
+                storeFile = file(path)
+                storePassword = envOrDefault("DEBUG_KEYSTORE_PASSWORD", "android")
+                keyAlias = envOrDefault("DEBUG_KEY_ALIAS", "androiddebugkey")
+                keyPassword = envOrDefault("DEBUG_KEY_PASSWORD", "android")
+            }
+        }
     }
 
     buildTypes {
+        getByName("debug") {
+            // Stable debug signing key when DEBUG_KEYSTORE_FILE is set; AGP's default debug key otherwise.
+            if (debugKeystoreFile != null) {
+                signingConfig = signingConfigs.getByName("ciDebug")
+            }
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true

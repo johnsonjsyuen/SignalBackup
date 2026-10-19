@@ -1,7 +1,7 @@
 package com.johnsonyuen.signalbackup.ui.screen.home
 
-import android.content.Context
 import android.util.Log
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -41,22 +41,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import androidx.credentials.CredentialManager
-import androidx.credentials.GetCredentialRequest
-import androidx.credentials.exceptions.GetCredentialCancellationException
-import androidx.credentials.exceptions.GetCredentialException
-import androidx.credentials.exceptions.NoCredentialException
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
-import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
-import com.google.android.libraries.identity.googleid.GoogleIdTokenParsingException
-import com.johnsonyuen.signalbackup.BuildConfig
+import androidx.lifecycle.repeatOnLifecycle
 import com.johnsonyuen.signalbackup.R
 import com.johnsonyuen.signalbackup.domain.scheduling.UploadRunState
-import com.johnsonyuen.signalbackup.ui.common.UiText
 import com.johnsonyuen.signalbackup.ui.common.resolve
 import com.johnsonyuen.signalbackup.ui.component.CleanUpDialog
 import com.johnsonyuen.signalbackup.ui.component.LastResultCard
@@ -76,43 +68,53 @@ fun HomeScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val activity = LocalActivity.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
     // The ViewModel remembers which action is waiting on consent, so this survives rotation.
     val consentLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
-    ) { result -> viewModel.onConsentResult(result.data) }
+    ) { result ->
+        Log.d(TAG, "Consent result: resultCode=${result.resultCode}")
+        viewModel.onConsentResult(result.data)
+    }
 
-    LaunchedEffect(viewModel) {
-        viewModel.events.collect { event ->
-            when (event) {
-                is HomeEvent.LaunchConsent -> {
-                    try {
-                        consentLauncher.launch(IntentSenderRequest.Builder(event.pendingIntent).build())
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Could not launch consent screen: ${e.javaClass.simpleName}")
-                        viewModel.onConsentLaunchFailed()
+    // Only handle events while RESUMED: launching the consent screen right after the Credential
+    // Manager sheet closes (before the activity is resumed) can be dropped silently. The events
+    // channel is buffered, so events wait until the screen is resumed.
+    LaunchedEffect(viewModel, lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            viewModel.events.collect { event ->
+                when (event) {
+                    is HomeEvent.LaunchConsent -> {
+                        try {
+                            consentLauncher.launch(IntentSenderRequest.Builder(event.pendingIntent).build())
+                            viewModel.onConsentLaunched()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Could not launch consent screen: ${e.javaClass.simpleName}")
+                            viewModel.onConsentLaunchFailed()
+                        }
                     }
-                }
-                is HomeEvent.ShowMessage -> {
-                    val text = event.text.resolve(context)
-                    launch { snackbarHostState.showSnackbar(text) }
+                    is HomeEvent.ShowMessage -> {
+                        val text = event.text.resolve(context)
+                        // Screen-wide scope so pausing doesn't dismiss the snackbar mid-show.
+                        scope.launch { snackbarHostState.showSnackbar(text) }
+                    }
                 }
             }
         }
     }
 
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.refreshLocalFolder() }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.onResumed() }
+    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { viewModel.onPaused() }
 
     val signIn: () -> Unit = {
-        scope.launch {
-            signInWithGoogle(context)?.let { outcome ->
-                when (outcome) {
-                    is SignInOutcome.Success -> viewModel.onSignedIn(outcome.email)
-                    is SignInOutcome.Error -> viewModel.onSignInError(outcome.message)
-                }
-            }
+        if (activity != null) {
+            viewModel.signIn(activity)
+        } else {
+            Log.w(TAG, "No Activity available for sign-in")
         }
     }
 
@@ -142,6 +144,7 @@ fun HomeScreen(
                 SetupChecklistCard(
                     setup = state.setup,
                     authorizing = state.authorizing,
+                    signingIn = state.signingIn,
                     onSignIn = signIn,
                     onGrantAccess = viewModel::grantDriveAccess,
                     onChooseFolder = onNavigateToSettings,
@@ -249,30 +252,4 @@ private fun FolderChips(localFolderName: String?, driveFolderName: String?, onCl
             },
         )
     }
-}
-
-private sealed interface SignInOutcome {
-    data class Success(val email: String) : SignInOutcome
-    data class Error(val message: UiText) : SignInOutcome
-}
-
-/** Credential Manager "Sign in with Google". Returns null when the user cancelled. */
-private suspend fun signInWithGoogle(context: Context): SignInOutcome? = try {
-    val option = GetSignInWithGoogleOption.Builder(BuildConfig.WEB_CLIENT_ID).build()
-    val request = GetCredentialRequest.Builder().addCredentialOption(option).build()
-    val result = CredentialManager.create(context).getCredential(context, request)
-    val email = GoogleIdTokenCredential.createFrom(result.credential.data).id
-    if (email.isNotBlank()) SignInOutcome.Success(email)
-    else SignInOutcome.Error(UiText.Res(R.string.sign_in_no_email))
-} catch (e: GetCredentialCancellationException) {
-    null
-} catch (e: NoCredentialException) {
-    Log.w(TAG, "No Google accounts available")
-    SignInOutcome.Error(UiText.Res(R.string.sign_in_no_accounts))
-} catch (e: GoogleIdTokenParsingException) {
-    Log.w(TAG, "Invalid Google ID token response")
-    SignInOutcome.Error(UiText.Res(R.string.sign_in_failed))
-} catch (e: GetCredentialException) {
-    Log.w(TAG, "Sign-in failed: ${e.javaClass.simpleName}")
-    SignInOutcome.Error(UiText.Res(R.string.sign_in_failed))
 }

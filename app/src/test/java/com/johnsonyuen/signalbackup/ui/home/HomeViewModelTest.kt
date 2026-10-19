@@ -1,9 +1,15 @@
 package com.johnsonyuen.signalbackup.ui.home
 
+import android.app.Activity
 import android.app.PendingIntent
 import android.util.Log
 import app.cash.turbine.test
+import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialUnknownException
+import com.johnsonyuen.signalbackup.R
 import com.johnsonyuen.signalbackup.data.auth.DriveAuthorizer
+import com.johnsonyuen.signalbackup.data.auth.GoogleAccountSignIn
+import com.johnsonyuen.signalbackup.data.auth.GoogleSignInResult
 import com.johnsonyuen.signalbackup.data.repository.UploadHistoryRepository
 import com.johnsonyuen.signalbackup.domain.model.DriveFile
 import com.johnsonyuen.signalbackup.domain.model.FailureReason
@@ -27,6 +33,7 @@ import com.johnsonyuen.signalbackup.ui.record
 import com.johnsonyuen.signalbackup.ui.common.LocalFolderAccess
 import com.johnsonyuen.signalbackup.ui.common.LocalFolderInfo
 import com.johnsonyuen.signalbackup.ui.common.MinuteTicker
+import com.johnsonyuen.signalbackup.ui.common.UiText
 import com.johnsonyuen.signalbackup.ui.consent.ConsentAction
 import com.johnsonyuen.signalbackup.ui.consent.DriveAuthorizationFlow
 import com.johnsonyuen.signalbackup.ui.navigation.FixAction
@@ -83,6 +90,24 @@ class HomeViewModelTest {
     private val folderAccess = mockk<LocalFolderAccess>()
     private val ticker = mockk<MinuteTicker>()
     private val fixBus = FixActionBus()
+    private val activity = mockk<Activity>()
+
+    /** Scriptable [GoogleAccountSignIn]: returns [result] or throws [error] after awaiting [gate]. */
+    private class FakeGoogleSignIn : GoogleAccountSignIn {
+        var result: GoogleSignInResult = GoogleSignInResult.Success("user@example.com")
+        var error: Exception? = null
+        var gate: CompletableDeferred<Unit>? = null
+        var calls = 0
+
+        override suspend fun signIn(activity: Activity): GoogleSignInResult {
+            calls++
+            gate?.await()
+            error?.let { throw it }
+            return result
+        }
+    }
+
+    private val googleSignIn = FakeGoogleSignIn()
 
     @Before
     fun setUp() {
@@ -112,6 +137,7 @@ class HomeViewModelTest {
         authorizationFlow = DriveAuthorizationFlow(authorizer, resolveFolder, scheduler),
         localFolderAccess = folderAccess,
         fixActionBus = fixBus,
+        googleSignIn = googleSignIn,
         ticker = ticker,
     )
 
@@ -283,6 +309,160 @@ class HomeViewModelTest {
         assertEquals(CleanUpState.Ready(kept, trash), vm.uiState.value.cleanUp)
         vm.confirmCleanUp()
         assertEquals(CleanUpState.Done(result), vm.uiState.value.cleanUp)
+    }
+
+    @Test
+    fun `sign-in success saves the email and starts drive authorization`() = runTest {
+        settings.state.value = DEFAULT_SETTINGS
+        val pendingIntent = mockk<PendingIntent>()
+        coEvery { authorizer.requestAuthorization() } returns pendingIntent
+        googleSignIn.result = GoogleSignInResult.Success("new@example.com")
+        val vm = viewModel()
+
+        vm.events.test {
+            vm.signIn(activity)
+            assertEquals(HomeEvent.LaunchConsent(pendingIntent, ConsentAction.RESOLVE_FOLDER), awaitItem())
+        }
+        assertEquals("new@example.com", settings.state.value.googleAccountEmail)
+        coVerify(exactly = 1) { authorizer.requestAuthorization() }
+    }
+
+    @Test
+    fun `cancellation with reauth failure shows a configuration message`() = runTest {
+        settings.state.value = DEFAULT_SETTINGS
+        googleSignIn.error = GetCredentialCancellationException("[16] Account reauth failed.")
+        val vm = viewModel()
+
+        vm.events.test {
+            vm.signIn(activity)
+            assertEquals(
+                HomeEvent.ShowMessage(UiText.Res(R.string.sign_in_failed_config, listOf("[16] Account reauth failed"))),
+                awaitItem(),
+            )
+        }
+        assertNull(settings.state.value.googleAccountEmail)
+    }
+
+    @Test
+    fun `plain user cancellation shows nothing`() = runTest {
+        settings.state.value = DEFAULT_SETTINGS
+        val vm = viewModel()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
+
+        vm.events.test {
+            googleSignIn.error = GetCredentialCancellationException("activity is cancelled by the user.")
+            vm.signIn(activity)
+            googleSignIn.error = GetCredentialCancellationException()
+            vm.signIn(activity)
+            expectNoEvents()
+        }
+        assertEquals(2, googleSignIn.calls)
+        assertFalse(vm.uiState.value.signingIn)
+        coVerify(exactly = 0) { authorizer.requestAuthorization() }
+    }
+
+    @Test
+    fun `other credential errors show the underlying message`() = runTest {
+        settings.state.value = DEFAULT_SETTINGS
+        googleSignIn.error = GetCredentialUnknownException("boom")
+        val vm = viewModel()
+
+        vm.events.test {
+            vm.signIn(activity)
+            assertEquals(
+                HomeEvent.ShowMessage(UiText.Res(R.string.sign_in_failed_detail, listOf("boom"))),
+                awaitItem(),
+            )
+        }
+    }
+
+    @Test
+    fun `unexpected credential type is reported`() = runTest {
+        settings.state.value = DEFAULT_SETTINGS
+        googleSignIn.result = GoogleSignInResult.UnexpectedCredential("other.type")
+        val vm = viewModel()
+
+        vm.events.test {
+            vm.signIn(activity)
+            assertEquals(
+                HomeEvent.ShowMessage(UiText.Res(R.string.sign_in_failed_detail, listOf("other.type"))),
+                awaitItem(),
+            )
+        }
+        assertNull(settings.state.value.googleAccountEmail)
+    }
+
+    @Test
+    fun `second sign-in tap while one is in flight is ignored`() = runTest {
+        settings.state.value = DEFAULT_SETTINGS
+        coEvery { authorizer.requestAuthorization() } returns null
+        val gate = CompletableDeferred<Unit>()
+        googleSignIn.gate = gate
+        val vm = viewModel()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
+
+        vm.signIn(activity)
+        assertTrue(vm.uiState.value.signingIn)
+        vm.signIn(activity)
+        assertEquals(1, googleSignIn.calls)
+
+        gate.complete(Unit)
+        assertFalse(vm.uiState.value.signingIn)
+        assertEquals("user@example.com", settings.state.value.googleAccountEmail)
+    }
+
+    @Test
+    fun `consent launched but abandoned clears authorizing on resume and allows a new request`() = runTest {
+        val pendingIntent = mockk<PendingIntent>()
+        coEvery { authorizer.requestAuthorization() } returns pendingIntent
+        val vm = viewModel()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
+
+        vm.events.test {
+            vm.grantDriveAccess()
+            assertEquals(HomeEvent.LaunchConsent(pendingIntent, ConsentAction.RESOLVE_FOLDER), awaitItem())
+            vm.onConsentLaunched()
+            // A resume without a pause (consent screen not yet shown) must not clear the flag.
+            vm.onResumed()
+            assertTrue(vm.uiState.value.authorizing)
+
+            vm.onPaused()
+            vm.onResumed()
+            assertFalse(vm.uiState.value.authorizing)
+
+            vm.grantDriveAccess()
+            assertEquals(HomeEvent.LaunchConsent(pendingIntent, ConsentAction.RESOLVE_FOLDER), awaitItem())
+        }
+        coVerify(exactly = 2) { authorizer.requestAuthorization() }
+    }
+
+    @Test
+    fun `consent result before resume keeps the normal round trip`() = runTest {
+        val pendingIntent = mockk<PendingIntent>()
+        coEvery { authorizer.requestAuthorization() } returns pendingIntent
+        coEvery { authorizer.handleAuthorizationResult(any()) } returns true
+        val vm = viewModel()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.uiState.collect {} }
+
+        vm.events.test {
+            vm.onFix(ResultFix.GRANT_ACCESS)
+            awaitItem()
+            vm.onConsentLaunched()
+            vm.onPaused()
+            vm.onConsentResult(null)
+            vm.onResumed()
+            cancelAndIgnoreRemainingEvents()
+        }
+        assertFalse(vm.uiState.value.authorizing)
+        coVerify(exactly = 1) { manualUpload() }
+    }
+
+    @Test
+    fun `user dismissal heuristic`() {
+        assertTrue(HomeViewModel.isUserDismissal(null))
+        assertTrue(HomeViewModel.isUserDismissal("activity is cancelled by the user."))
+        assertFalse(HomeViewModel.isUserDismissal("[16] Account reauth failed."))
+        assertFalse(HomeViewModel.isUserDismissal("Something else"))
     }
 
     @Test

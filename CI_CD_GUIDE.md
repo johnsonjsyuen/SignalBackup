@@ -12,12 +12,20 @@ cancel each other (`concurrency` with `cancel-in-progress`).
 **Job "Build, test & lint"** (`ubuntu-latest`, 45 min timeout, `contents: read`):
 
 1. Checkout, Temurin JDK 21, `gradle/actions/setup-gradle` (build cache).
-2. `./gradlew assembleDebug`
-3. `./gradlew testDebugUnitTest`
-4. `./gradlew lintDebug` (lint has `abortOnError = true`; config in `app/lint.xml`)
-5. `./gradlew assembleRelease`: unsigned, checks that R8/minification works.
+2. Decode the optional `DEBUG_KEYSTORE_BASE64` secret to `$RUNNER_TEMP/debug.keystore` and export
+   `DEBUG_KEYSTORE_FILE`, so debug APKs have a stable SHA-1. If it is missing (including PRs from
+   forks), a warning is emitted and the runner's throwaway debug key is used: that APK cannot sign in
+   with Google. The keystore is deleted at the end of the job.
+3. `./gradlew assembleDebug`, then print the debug APK's signing certificate (SHA-1/SHA-256) to the
+   step summary.
+4. `./gradlew testDebugUnitTest`
+5. `./gradlew lintDebug` (lint has `abortOnError = true`; config in `app/lint.xml`)
+6. `./gradlew assembleRelease`: unsigned, checks that R8/minification works.
 
-Steps 3–5 run only if the debug build succeeded, and each runs even if an earlier one of them failed,
+Every Gradle call gets `-Psignalbackup.webClientId=$WEB_CLIENT_ID` when the repository variable
+`WEB_CLIENT_ID` is non-empty; otherwise the default in `app/build.gradle.kts` is used.
+
+Steps 4–6 run only if the debug build succeeded, and each runs even if an earlier one of them failed,
 so one push reports compile, test and lint problems together.
 
 **Artifacts** (Actions run page): `debug-apk` (14 days), `test-reports`, `lint-reports` (14 days),
@@ -55,11 +63,12 @@ Steps:
    - `versionCode` = `MAJOR*1000000 + MINOR*1000 + PATCH` (the suffix is ignored, so publish
      pre-releases with a patch number higher than the last stable release)
 3. Decode `KEYSTORE_BASE64` into `$RUNNER_TEMP/release.keystore` (fails if the secret is missing).
-4. `./gradlew assembleRelease -PversionName=… -PversionCode=…` with `KEYSTORE_FILE`,
+4. `./gradlew assembleRelease -PversionName=… -PversionCode=…` (plus `-Psignalbackup.webClientId`
+   if the `WEB_CLIENT_ID` variable is set) with `KEYSTORE_FILE`,
    `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD` in the environment (annotated on failure as above).
 5. Delete the keystore (always).
-6. Copy the APK to `SignalBackup-<versionName>.apk`, run `apksigner verify --print-certs`, and
-   write `SHA256SUMS.txt`.
+6. Copy the APK to `SignalBackup-<versionName>.apk`, run `apksigner verify --print-certs` (the
+   certificate's SHA-1/SHA-256 also go to the step summary), and write `SHA256SUMS.txt`.
 7. Attest build provenance for the APK (`actions/attest-build-provenance`).
 8. Create the GitHub Release with auto-generated notes, attaching the APK and `SHA256SUMS.txt`. Tags
    containing `-` are marked as pre-releases.
@@ -84,9 +93,15 @@ keytool -genkeypair -v -keystore release.jks -keyalg RSA -keysize 4096 -validity
 Register the release key's SHA-1 as an Android OAuth client in the Google Cloud project (see
 README), or Drive authorization will fail in release builds.
 
-`signalbackup.webClientId` isn't passed in CI, so CI and release builds use the default Web client ID
-in `app/build.gradle.kts`. If you use your own Cloud project, change that default or add
-`-Psignalbackup.webClientId=…` to the workflow.
+### Optional CI secret and variable
+
+| Name | Kind | Value |
+|---|---|---|
+| `DEBUG_KEYSTORE_BASE64` | repository secret | `base64 -w0 ~/.android/debug.keystore` (macOS: `base64 -i …`). Uses the standard `android` / `androiddebugkey` / `android` credentials; override with `DEBUG_KEYSTORE_PASSWORD`, `DEBUG_KEY_ALIAS`, `DEBUG_KEY_PASSWORD` env vars if your key differs. |
+| `WEB_CLIENT_ID` | repository variable (Settings › Secrets and variables › Actions › Variables) | Web OAuth client ID. Empty or unset means the default in `app/build.gradle.kts`, which belongs to the maintainer's Cloud project. |
+
+Using your own `~/.android/debug.keystore` means CI debug APKs and local debug builds share one
+SHA-1, so one Android OAuth client covers both.
 
 ### Making a release
 
@@ -108,6 +123,11 @@ gh attestation verify SignalBackup-1.2.3.apk -R johnsonjsyuen/SignalBackup
 environment variable is non-blank. Otherwise `assembleRelease` produces an unsigned APK, which is
 what the CI build workflow relies on.
 
+Likewise, when `DEBUG_KEYSTORE_FILE` is non-blank it creates a `ciDebug` signing config
+(`DEBUG_KEYSTORE_PASSWORD` / `DEBUG_KEY_ALIAS` / `DEBUG_KEY_PASSWORD`, defaulting to
+`android` / `androiddebugkey` / `android`) and uses it for the debug build type. Unset, debug builds
+use AGP's default `~/.android/debug.keystore`.
+
 ## Dependabot
 
 Weekly updates for:
@@ -128,3 +148,20 @@ Lint's dependency-freshness checks are disabled in `app/lint.xml` because Depend
 - **Tag pushed but no run:** the tag must start with `v` and be pushed explicitly (`git push origin <tag>`).
 - **Lint fails CI:** read the annotations, or download `lint-reports`. Fix the issue or, if it's
   deliberate, configure it in `app/lint.xml`.
+
+### Google sign-in fails silently
+
+The account picker closes after you choose an account and nothing happens (logcat:
+`[16] Account reauth failed`). Google doesn't recognise the APK's signing certificate.
+
+- Register an **Android OAuth client** (package `com.johnsonyuen.signalbackup` + SHA-1) for every key
+  that signs APKs you install: local debug key, the `DEBUG_KEYSTORE_BASE64` key, the release key, and
+  the Play App Signing key. They must be in the **same Cloud project as the Web client ID** the APK
+  was built with.
+- OAuth consent screen: External; while in Testing, add your account as a test user.
+- SHA-1 sources: the "signing certificate" section of the CI/release step summary,
+  `./gradlew signingReport`, or `keytool -list -v -keystore <keystore>`.
+- A CI `debug-apk` built without the `DEBUG_KEYSTORE_BASE64` secret (see the run's warning) is signed
+  with a throwaway key and can never sign in; add the secret and rebuild.
+- If you use your own Cloud project, set the `WEB_CLIENT_ID` variable.
+- Diagnose on device: `adb logcat | grep -iE "credential|reauth"`.

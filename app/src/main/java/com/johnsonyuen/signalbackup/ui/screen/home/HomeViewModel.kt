@@ -1,9 +1,16 @@
 package com.johnsonyuen.signalbackup.ui.screen.home
 
+import android.app.Activity
 import android.content.Intent
+import android.util.Log
+import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.NoCredentialException
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.johnsonyuen.signalbackup.R
+import com.johnsonyuen.signalbackup.data.auth.GoogleAccountSignIn
+import com.johnsonyuen.signalbackup.data.auth.GoogleSignInResult
 import com.johnsonyuen.signalbackup.data.repository.SettingsRepository
 import com.johnsonyuen.signalbackup.data.repository.UploadHistoryRepository
 import com.johnsonyuen.signalbackup.domain.model.AppSettings
@@ -57,11 +64,13 @@ class HomeViewModel @Inject constructor(
     private val authorizationFlow: DriveAuthorizationFlow,
     private val localFolderAccess: LocalFolderAccess,
     private val fixActionBus: FixActionBus,
+    private val googleSignIn: GoogleAccountSignIn,
     ticker: MinuteTicker,
 ) : ViewModel() {
 
     private data class LocalState(
         val authorizing: Boolean = false,
+        val signingIn: Boolean = false,
         val authorizedThisSession: Boolean = false,
         val cleanUp: CleanUpState = CleanUpState.Hidden,
     )
@@ -74,6 +83,10 @@ class HomeViewModel @Inject constructor(
     val events: Flow<HomeEvent> = _events.receiveAsFlow()
 
     private var pendingConsentAction: ConsentAction? = null
+    /** The consent screen was launched and its result hasn't arrived yet. */
+    private var consentLaunched = false
+    /** The screen paused after [consentLaunched], i.e. the consent screen actually took over. */
+    private var pausedSinceConsentLaunch = false
     private var scanJob: Job? = null
 
     private val folderInfo: Flow<LocalFolderInfo?> =
@@ -144,6 +157,7 @@ class HomeViewModel @Inject constructor(
             nextRunMillis = if (settings.scheduleEnabled) nextRun else null,
             scheduleEnabled = settings.scheduleEnabled,
             authorizing = localState.authorizing,
+            signingIn = localState.signingIn,
             cleanUp = localState.cleanUp,
         )
     }
@@ -151,6 +165,38 @@ class HomeViewModel @Inject constructor(
     /** Re-reads the local folder (e.g. when the screen resumes). */
     fun refreshLocalFolder() {
         folderRefresh.update { it + 1 }
+    }
+
+    /** The screen launched the consent screen for the last [HomeEvent.LaunchConsent]. */
+    fun onConsentLaunched() {
+        consentLaunched = true
+        pausedSinceConsentLaunch = false
+    }
+
+    /** ON_PAUSE of the Home screen. */
+    fun onPaused() {
+        if (consentLaunched) pausedSinceConsentLaunch = true
+    }
+
+    /**
+     * ON_RESUME of the Home screen. The consent result is delivered before ON_RESUME, so if the
+     * consent screen was launched, took over the screen, and we are back without a result, the
+     * result was lost: clear the `authorizing` latch so the user can try again.
+     */
+    fun onResumed() {
+        refreshLocalFolder()
+        if (consentLaunched && pausedSinceConsentLaunch) {
+            consentLaunched = false
+            pausedSinceConsentLaunch = false
+            if (pendingConsentAction != null) onConsentAbandoned()
+        }
+    }
+
+    private fun onConsentAbandoned() {
+        Log.w(TAG, "Consent screen closed without a result; clearing authorizing flag")
+        // pendingConsentAction is kept so a late result (e.g. after activity recreation) still
+        // resumes the right action; the next authorize() overwrites it.
+        local.update { it.copy(authorizing = false) }
     }
 
     fun uploadNow() {
@@ -162,10 +208,51 @@ class HomeViewModel @Inject constructor(
         uploadScheduler.cancelRunningUploads()
     }
 
+    /**
+     * Credential Manager "Sign in with Google". Runs in [viewModelScope] so it survives activity
+     * recreation while the picker is up. [activity] is required by Credential Manager. Ignored while
+     * a sign-in is already in flight.
+     */
+    fun signIn(activity: Activity) {
+        if (local.value.signingIn) return
+        local.update { it.copy(signingIn = true) }
+        viewModelScope.launch {
+            val error: UiText? = try {
+                when (val result = googleSignIn.signIn(activity)) {
+                    is GoogleSignInResult.Success -> {
+                        onSignedIn(result.email)
+                        null
+                    }
+                    is GoogleSignInResult.UnexpectedCredential ->
+                        UiText.Res(R.string.sign_in_failed_detail, listOf(result.type))
+                    GoogleSignInResult.InvalidToken -> UiText.Res(R.string.sign_in_failed)
+                    GoogleSignInResult.NoEmail -> UiText.Res(R.string.sign_in_no_email)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: GetCredentialException) {
+                signInErrorText(e)
+            } catch (e: Exception) {
+                Log.w(TAG, "Sign-in failed: ${e.javaClass.simpleName}")
+                UiText.Res(R.string.sign_in_failed_detail, listOf(e.javaClass.simpleName))
+            } finally {
+                local.update { it.copy(signingIn = false) }
+            }
+            error?.let { _events.send(HomeEvent.ShowMessage(it)) }
+        }
+    }
+
     /** Called after Credential Manager sign-in succeeds. */
     fun onSignedIn(email: String) {
         viewModelScope.launch {
             settingsRepository.setGoogleAccountEmail(email)
+            // A fresh sign-in starts a new authorization; clear a flag left stuck by a lost consent result.
+            if (local.value.authorizing) {
+                Log.w(TAG, "Clearing stale authorizing flag after sign-in")
+                pendingConsentAction = null
+                consentLaunched = false
+                local.update { it.copy(authorizing = false) }
+            }
             authorize(ConsentAction.RESOLVE_FOLDER)
         }
     }
@@ -187,7 +274,10 @@ class HomeViewModel @Inject constructor(
     }
 
     private suspend fun authorize(action: ConsentAction) {
-        if (local.value.authorizing) return
+        if (local.value.authorizing) {
+            Log.w(TAG, "Authorization already in progress; ignoring request for $action")
+            return
+        }
         local.update { it.copy(authorizing = true) }
         when (val start = authorizationFlow.start()) {
             is AuthorizationStart.Authorized -> {
@@ -210,6 +300,7 @@ class HomeViewModel @Inject constructor(
     fun onConsentResult(data: Intent?) {
         val resumeAction = pendingConsentAction ?: ConsentAction.RESOLVE_FOLDER
         pendingConsentAction = null
+        consentLaunched = false
         viewModelScope.launch {
             val result = authorizationFlow.complete(data)
             local.update {
@@ -223,6 +314,7 @@ class HomeViewModel @Inject constructor(
     /** The consent screen could not be launched. */
     fun onConsentLaunchFailed() {
         pendingConsentAction = null
+        consentLaunched = false
         local.update { it.copy(authorizing = false) }
         viewModelScope.launch {
             _events.send(HomeEvent.ShowMessage(UiText.Res(R.string.error_consent_launch)))
@@ -239,6 +331,19 @@ class HomeViewModel @Inject constructor(
 
     fun onSignInError(message: UiText) {
         viewModelScope.launch { _events.send(HomeEvent.ShowMessage(message)) }
+    }
+
+    /** Logs [e] (type and message only; no account data) and returns the message to show, or null. */
+    private fun signInErrorText(e: GetCredentialException): UiText? {
+        val message = e.message?.trim()?.trimEnd('.')
+        Log.w(TAG, "Sign-in failed: type=${e.type} message=$message")
+        return when (e) {
+            is GetCredentialCancellationException ->
+                if (isUserDismissal(message)) null
+                else UiText.Res(R.string.sign_in_failed_config, listOf(message.orEmpty()))
+            is NoCredentialException -> UiText.Res(R.string.sign_in_no_accounts)
+            else -> UiText.Res(R.string.sign_in_failed_detail, listOf(message ?: e.type))
+        }
     }
 
     // --- Clean Up ---
@@ -294,5 +399,21 @@ class HomeViewModel @Inject constructor(
 
     private fun setCleanUp(state: CleanUpState) {
         local.update { it.copy(cleanUp = state) }
+    }
+
+    companion object {
+        private const val TAG = "HomeViewModel"
+        /**
+         * True when a [GetCredentialCancellationException] message looks like the user closing the
+         * picker (no message, or one that says it was cancelled). Play services also reports
+         * configuration problems (unregistered signing key, consent screen in Testing) as
+         * cancellation after an account is picked, e.g. "[16] Account reauth failed"; those and any
+         * other unrecognised message are not treated as dismissals.
+         */
+        internal fun isUserDismissal(message: String?): Boolean {
+            if (message.isNullOrBlank()) return true
+            if (message.contains("reauth", ignoreCase = true)) return false
+            return message.contains("cancel", ignoreCase = true)
+        }
     }
 }

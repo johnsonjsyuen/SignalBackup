@@ -190,6 +190,7 @@ fun SetupChecklistCard(
     onGrantAccess: () -> Unit,
     onChooseFolder: () -> Unit,
     modifier: Modifier = Modifier,
+    signingIn: Boolean = false,
 ) {
     Card(modifier = modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -203,6 +204,7 @@ fun SetupChecklistCard(
                 title = stringResource(R.string.setup_sign_in),
                 actionLabel = stringResource(R.string.action_sign_in),
                 onAction = onSignIn,
+                actionEnabled = !signingIn,
             )
             ChecklistRow(
                 done = setup.driveAuthorized,
